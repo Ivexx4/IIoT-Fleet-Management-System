@@ -8,8 +8,8 @@ import paho.mqtt.client as mqtt
 from datetime import datetime, timezone
 
 # --- CONFIGURATION ---
-#STALL_PROBABILITY = 5  # 5% probability
-STALL_PROBABILITY = 0
+STALL_PROBABILITY = 5  # 5% probability
+#STALL_PROBABILITY = 0
 BATTERY_DECAY_RATE = 1  # 1% per second
 
 
