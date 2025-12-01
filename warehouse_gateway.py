@@ -1,7 +1,5 @@
 import json
 import struct
-import socket
-import threading
 import time
 import re
 from datetime import datetime
@@ -15,25 +13,18 @@ from influxdb_client_3 import InfluxDBClient3,Point
 # ==========================================
 # CONFIGURATION
 # ==========================================
-GROUP_ID = "2024209219"  # Replace with your actual Group ID (Student Number) [cite: 110]
-#MQTT_BROKER = "localhost"  # Or "srsa-pi-8.dei.uc.pt" if onsite [cite: 162]
+GROUP_ID = "2024209219"
+#MQTT_BROKER = "localhost"
 MQTT_BROKER = "srsa-pi-8.dei.uc.pt"
 MQTT_PORT = 1883
-#UDP_IP = "0.0.0.0"
-# UDP Configuration (Alert Server)
-UDP_PORT = 9090  # [cite: 177]
 
-# InfluxDB Configuration
-INFLUX_URL = "https://eu-central-1-1.aws.cloud2.influxdata.com"  # Example Cloud URL [cite: 233]
+INFLUX_URL = "https://eu-central-1-1.aws.cloud2.influxdata.com"
 INFLUX_TOKEN = "dG2CP2aLbN7EO1WC1LMZkkEGu5QnKLkrvHGCygn0rdelNa0w_LPEcnBJCkaGM2XmSwnqv-4ATgrk7I6hZX6eAg=="
 INFLUX_ORG = "ivo rosa"
 INFLUX_BUCKET = "warehouse_data"
 
-# Topics
-# Subscribe to all raw sensor topics (Robots + Shelves)
-TOPIC_SENSORS_WILDCARD = f"warehouse/{GROUP_ID}/#"  # [cite: 167]
-# Subscribe to Task Dispatch from Coordinator
-TOPIC_TASK_DISPATCH = f"{GROUP_ID}/internal/tasks/dispatch"  # [cite: 176]
+TOPIC_SENSORS_WILDCARD = f"warehouse/{GROUP_ID}/#"
+TOPIC_TASK_DISPATCH = f"{GROUP_ID}/internal/tasks/dispatch"
 
 
 # ==========================================
@@ -47,18 +38,12 @@ class WarehouseGateway:
         self.mqtt_client.on_connect = self.on_connect
         self.mqtt_client.on_message = self.on_message
 
-        # UPDATED: Initialize InfluxDB Client 3
-        # Client 3 simplifies the connection; no separate WriteAPI object needed
         self.influx_client = InfluxDBClient3(
             host=INFLUX_URL,
             token=INFLUX_TOKEN,
             org=INFLUX_ORG,
             database=INFLUX_BUCKET
         )
-
-        # Initialize UDP Socket for High Priority Alerts [cite: 177]
-        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp_sock.bind((UDP_IP, UDP_PORT))
 
         print(f"[{datetime.now()}] Gateway Initialized for {GROUP_ID}")
 
@@ -69,18 +54,12 @@ class WarehouseGateway:
         except Exception as e:
             print(f"Error connecting to MQTT Broker: {e}")
 
-        # Start UDP Server in background thread
-        #udp_thread = threading.Thread(target=self.run_udp_server)
-        #udp_thread.daemon = True
-        #udp_thread.start()
-
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
             print("Stopping Gateway...")
             self.mqtt_client.loop_stop()
-            self.udp_sock.close()
             self.influx_client.close()
 
     # ------------------------------------------
@@ -105,36 +84,11 @@ class WarehouseGateway:
                 self.process_command_json(payload_str)
 
             elif topic.startswith(f"warehouse/{GROUP_ID}/"):
-                # Handle Raw Sensor Data [cite: 178]
+                # Handle Raw Sensor Data
                 self.process_sensor_data(topic, payload_str)
 
         except Exception as e:
             print(f"Error processing message on {topic}: {e}")
-
-    # ------------------------------------------
-    # UDP SERVER (System Monitor Alerts)
-    # ------------------------------------------
-    def run_udp_server(self):
-        """
-        Receives high-priority alert messages from the System Monitor on port 9090[cite: 177].
-        """
-        print(f"UDP Server listening on port {UDP_PORT}...")
-        while True:
-            try:
-                data, addr = self.udp_sock.recvfrom(1024)
-                message = data.decode('utf-8')
-                print(f"Received UDP Alert from {addr}: {message}")
-
-                # Check if it's an override command (FORCE_CHARGE)
-                if "FORCE_CHARGE" in message or "EXECUTE_TASK" in message:
-                    self.process_command_json(message)
-                else:
-                    # Log generic alerts to InfluxDB
-                    p = Point("system_alerts").tag("source", "UDP").field("message", message)
-                    self.influx_client.write(record=p)
-
-            except Exception as e:
-                print(f"UDP Error: {e}")
 
     # ------------------------------------------
     # SENSOR DATA PROCESSING & STANDARDIZATION
@@ -160,7 +114,7 @@ class WarehouseGateway:
                 # Assume storage-a or others are already units
                 data["stock_units"] = int(data["stock"])
 
-            # 2. STORE IN INFLUXDB (Client 3 Usage) [cite: 180]
+            # 2. STORE IN INFLUXDB (Client 3 Usage)
             # In Client 3, we simply call .write() on the client instance
             if "robot_id" in data:
 
@@ -191,7 +145,7 @@ class WarehouseGateway:
     # ------------------------------------------
     def process_command_json(self, json_str):
         """
-        Translates JSON commands into 3-byte binary format and publishes to specific robot[cite: 185, 189].
+        Translates JSON commands into 3-byte binary format and publishes to specific robot.
         """
         try:
             cmd_data = json.loads(json_str)
@@ -232,10 +186,8 @@ class WarehouseGateway:
                 station_byte = station_raw
 
             # --- ENCODING & SENDING ---
-            # Struct format 'BBB' = 3 unsigned chars (1 byte each) -> Total 3 Bytes [cite: 184]
             binary_payload = struct.pack('BBB', cmd_byte, shelf_byte, station_byte)
 
-            # Topic: warehouse/{GroupID}/amr/{robot_id}/command [cite: 104]
             target_topic = f"warehouse/{GROUP_ID}/amr/{robot_id}/command"
 
             print(f"Sending Binary Command to {target_topic}: {binary_payload.hex().upper()}")

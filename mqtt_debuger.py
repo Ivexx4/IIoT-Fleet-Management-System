@@ -1,5 +1,3 @@
-# tested on Python 3.9.6, with Mosquitto 2.0.11
-# uses paho-mqtt-2.1.0 (the syntax is different from paho-mqtt-1.x.x)
 
 import sys
 import paho.mqtt.client as mqtt_subscribe  # import library
@@ -48,10 +46,13 @@ if __name__ == "__main__":
     client.on_connect = on_connect
     client.on_message = on_message
     try:
+    for i in range(1):
         client.connect(MQTT_BROKER, MQTT_PORT)
+
     except Exception as e:
         print(f"Erro ao conectar: {e}")
         sys.exit(1)
+
     try:
         client.loop_forever()
     except KeyboardInterrupt:
