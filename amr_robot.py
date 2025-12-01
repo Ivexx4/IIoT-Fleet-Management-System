@@ -7,9 +7,7 @@ import argparse
 import paho.mqtt.client as mqtt
 from datetime import datetime, timezone
 
-# --- CONFIGURATION ---
 STALL_PROBABILITY = 5  # 5% probability
-#STALL_PROBABILITY = 0
 BATTERY_DECAY_RATE = 1  # 1% per second
 #BROKER="localhost"
 BROKER="srsa-pi-8.dei.uc.pt"
@@ -21,22 +19,15 @@ class AMRRobot:
         self.broker_address = broker_address
         self.broker_port = broker_port
 
-        # State Variables
         self.status = "IDLE"  #
         self.location_id = "DOCK"  #
         self.battery = 100.0  #
 
-        # Task Targets
         self.target_shelf = None
         self.target_station = None
 
-        # Timing
         self.state_start_time = time.time()
-
-        # --- MQTT SETUP (Version Safe) ---
-        # This block ensures compatibility with both Paho 1.x and 2.x
         client_name = f"{group_id}_{robot_id}"
-
         self.client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=client_name)
@@ -196,7 +187,6 @@ class AMRRobot:
 
 
 if __name__ == "__main__":
-    # --- ARGUMENT PARSING ---
     parser = argparse.ArgumentParser(description="Simulate an AMR Robot.")
 
     # Positional arguments
