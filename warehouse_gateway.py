@@ -241,6 +241,19 @@ class WarehouseGateway:
             print(f"Sending Binary Command to {target_topic}: {binary_payload.hex().upper()}")
             self.mqtt_client.publish(target_topic, binary_payload)
 
+            try:
+                point = Point("Task_History") \
+                    .tag("robot_id", robot_id) \
+                    .tag("command_type", cmd_type_str) \
+                    .field("target_shelf", str(shelf_raw)) \
+                    .field("target_station", str(station_raw))
+
+                self.influx_client.write(record=point)
+                print(f"[{robot_id}] Comando registado no InfluxDB.")
+            except Exception as e:
+                print(f"Erro ao gravar comando no InfluxDB: {e}")
+
+
         except Exception as e:
             print(f"Error encoding command: {e}")
 
