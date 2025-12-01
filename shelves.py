@@ -157,7 +157,7 @@ if __name__ == "__main__":
     group_id = args.group_id
     zone_id = args.zone_id
     asset_id = args.asset_id
-    update_time = args.update
+    update_time = args.update_time
     shelf = Shelf(group_id, zone_id, asset_id, update_time)
     shelf.run()
 

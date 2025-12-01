@@ -46,7 +46,6 @@ if __name__ == "__main__":
     client.on_connect = on_connect
     client.on_message = on_message
     try:
-    for i in range(1):
         client.connect(MQTT_BROKER, MQTT_PORT)
 
     except Exception as e:
