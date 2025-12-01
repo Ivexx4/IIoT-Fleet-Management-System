@@ -8,9 +8,8 @@ from datetime import datetime
 
 # --- CONFIGURAÇÃO ---
 GROUP_ID = "2024209219"
-MQTT_BROKER ="localhost"
-#MQTT_BROKER = "srsa-pi-8.dei.uc.pt"
-#MQTT_BROKER ="https://test.mosquitto.org/"
+#MQTT_BROKER ="localhost"
+MQTT_BROKER = "srsa-pi-8.dei.uc.pt"
 MQTT_PORT = 1883
 
 

@@ -16,10 +16,10 @@ from influxdb_client_3 import InfluxDBClient3,Point
 # CONFIGURATION
 # ==========================================
 GROUP_ID = "2024209219"  # Replace with your actual Group ID (Student Number) [cite: 110]
-MQTT_BROKER = "localhost"  # Or "srsa-pi-8.dei.uc.pt" if onsite [cite: 162]
-
+#MQTT_BROKER = "localhost"  # Or "srsa-pi-8.dei.uc.pt" if onsite [cite: 162]
+MQTT_BROKER = "srsa-pi-8.dei.uc.pt"
 MQTT_PORT = 1883
-UDP_IP = "0.0.0.0"
+#UDP_IP = "0.0.0.0"
 # UDP Configuration (Alert Server)
 UDP_PORT = 9090  # [cite: 177]
 
@@ -70,9 +70,9 @@ class WarehouseGateway:
             print(f"Error connecting to MQTT Broker: {e}")
 
         # Start UDP Server in background thread
-        udp_thread = threading.Thread(target=self.run_udp_server)
-        udp_thread.daemon = True
-        udp_thread.start()
+        #udp_thread = threading.Thread(target=self.run_udp_server)
+        #udp_thread.daemon = True
+        #udp_thread.start()
 
         try:
             while True:

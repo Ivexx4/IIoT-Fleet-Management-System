@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 STALL_PROBABILITY = 5  # 5% probability
 #STALL_PROBABILITY = 0
 BATTERY_DECAY_RATE = 1  # 1% per second
-
+#BROKER="localhost"
+BROKER="srsa-pi-8.dei.uc.pt"
 
 class AMRRobot:
     def __init__(self, group_id, robot_id, broker_address, broker_port=1883):
@@ -203,7 +204,7 @@ if __name__ == "__main__":
     parser.add_argument("robot_id", help="The unique ID of this robot")
 
     args = parser.parse_args()
-    BROKER="localhost"
+
 
     bot = AMRRobot(args.group_id, args.robot_id, BROKER)
     bot.run()
