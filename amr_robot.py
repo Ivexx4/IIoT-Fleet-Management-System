@@ -187,7 +187,7 @@ class AMRRobot:
             while True:
                 self.update_logic()
 
-                time.sleep(1)  #
+                time.sleep(0.1)  #
         except KeyboardInterrupt:
             print("Stopping Robot...")
             self.client.loop_stop()
