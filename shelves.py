@@ -146,19 +146,7 @@ class Shelf:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 5:
-        print("Usage: python3 shelves.py {GroupID} {zone_id} {asset_id} {update_time}")
-        sys.exit(1)
 
-    group_id = sys.argv[1]
-    zone_id = sys.argv[2]
-    asset_id = sys.argv[3]
-
-    try:
-        update_time = float(sys.argv[4])
-    except ValueError:
-        print("Error: update_time must be a number.")
-        sys.exit(1)
     parser = argparse.ArgumentParser(description="Simulate an AMR Robot.")
     parser.add_argument("group_id", help="The ID of the warehouse group")
     parser.add_argument("zone_id", help="The unique ID of the zone where this Shelve is")
