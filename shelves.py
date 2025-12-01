@@ -153,7 +153,11 @@ if __name__ == "__main__":
     parser.add_argument("zone_id", help="The unique ID of the zone where this Shelve is")
     parser.add_argument("asset_id", help="The unique ID of this asset")
     parser.add_argument("update_time", help="The time interval between status updates (in seconds)", type=float)
-    # Instantiate and run the class
+    args = parser.parse_args()
+    group_id = args.group_id
+    zone_id = args.zone_id
+    asset_id = args.asset_id
+    update_time = args.update
     shelf = Shelf(group_id, zone_id, asset_id, update_time)
     shelf.run()
 
