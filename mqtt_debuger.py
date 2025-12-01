@@ -1,6 +1,5 @@
 # tested on Python 3.9.6, with Mosquitto 2.0.11
 # uses paho-mqtt-2.1.0 (the syntax is different from paho-mqtt-1.x.x)
-# MQTT Debugger (Based on subscriber_paho2.1.py)
 
 import sys
 import paho.mqtt.client as mqtt_subscribe  # import library
