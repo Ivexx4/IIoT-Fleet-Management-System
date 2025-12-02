@@ -7,11 +7,11 @@ import argparse
 import paho.mqtt.client as mqtt
 from datetime import datetime, timezone
 
-# --- CONFIGURATION ---
+# --- CONFIGURAÇÕES DE SIMULAÇÃO ---
 STALL_PROBABILITY = 5  # 5% probability
-#STALL_PROBABILITY = 0
 BATTERY_DECAY_RATE = 1  # 1% per second
-
+#BROKER="localhost"
+BROKER="srsa-pi-8.dei.uc.pt"
 
 class AMRRobot:
     def __init__(self, group_id, robot_id, broker_address, broker_port=1883):
@@ -20,22 +20,15 @@ class AMRRobot:
         self.broker_address = broker_address
         self.broker_port = broker_port
 
-        # State Variables
         self.status = "IDLE"  #
         self.location_id = "DOCK"  #
         self.battery = 100.0  #
 
-        # Task Targets
         self.target_shelf = None
         self.target_station = None
 
-        # Timing
         self.state_start_time = time.time()
-
-        # --- MQTT SETUP (Version Safe) ---
-        # This block ensures compatibility with both Paho 1.x and 2.x
         client_name = f"{group_id}_{robot_id}"
-
         self.client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=client_name)
@@ -46,6 +39,8 @@ class AMRRobot:
         # Topics
         self.topic_pub = f"warehouse/{group_id}/amr/{robot_id}/status"
         self.topic_sub = f"warehouse/{group_id}/amr/{robot_id}/command"
+        self.last_battery_update = time.time()
+
 
 
     def connect(self):
@@ -122,8 +117,18 @@ class AMRRobot:
         # --- BATTERY LOGIC ---
         active_states = ["MOVING_TO_PICK", "PICKING", "MOVING_TO_DROP", "DROPPING", "MOVING_TO_CHARGE"]
         if self.status in active_states:
-            self.battery -= BATTERY_DECAY_RATE
-            if self.battery < 0: self.battery = 0
+            current_time = time.time()
+            # Calcula quantos segundos passaram desde a última atualização
+            time_diff = current_time - self.last_battery_update
+            # Se passou mais de 1 segundo, retira bateria
+            if time_diff >= 1.0:
+                self.battery -= BATTERY_DECAY_RATE  # Retira 1%
+                self.publish_status()
+                self.last_battery_update = current_time  # Reseta o relógio
+                if self.battery < 0: self.battery = 0
+        else:
+            # Se não está ativo, atualiza o relógio para não acumular tempo "parado"
+            self.last_battery_update = time.time()
 
         # --- STATE MACHINE ---
         if self.status == "IDLE":
@@ -195,7 +200,6 @@ class AMRRobot:
 
 
 if __name__ == "__main__":
-    # --- ARGUMENT PARSING ---
     parser = argparse.ArgumentParser(description="Simulate an AMR Robot.")
 
     # Positional arguments
@@ -203,7 +207,7 @@ if __name__ == "__main__":
     parser.add_argument("robot_id", help="The unique ID of this robot")
 
     args = parser.parse_args()
-    BROKER="localhost"
+
 
     bot = AMRRobot(args.group_id, args.robot_id, BROKER)
     bot.run()
