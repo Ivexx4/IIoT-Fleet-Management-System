@@ -114,7 +114,7 @@ class Shelf:
 
     def refill(self):
         if self.config["type"] == "SHELF":
-            if self.current_stock <= 0:
+            if self.config["stock"] <= 0:
                 print(f"[{self.asset_id}] Stock empty! Refilling in 2 seconds...")
                 # Publish 0 status before waiting
                 self.config["stock"] = 0
