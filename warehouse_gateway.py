@@ -25,7 +25,7 @@ UDP_PORT = 9090  # [cite: 177]
 
 # InfluxDB Configuration
 INFLUX_URL = "https://eu-central-1-1.aws.cloud2.influxdata.com"  # Example Cloud URL [cite: 233]
-INFLUX_TOKEN = "dG2CP2aLbN7EO1WC1LMZkkEGu5QnKLkrvHGCygn0rdelNa0w_LPEcnBJCkaGM2XmSwnqv-4ATgrk7I6hZX6eAg=="
+INFLUX_TOKEN = "PhFvPN7XG9LLbRyFUQynTe6xjCcSpsRHxAivWMqW3KFABdyQjkv_J5Zsn84ekQr8DPCfNzPBa1HOYi0xY1hW4w=="
 INFLUX_ORG = "ivo rosa"
 INFLUX_BUCKET = "warehouse_data"
 
@@ -98,8 +98,8 @@ class WarehouseGateway:
     def on_message(self, client, userdata, msg):
         topic = msg.topic
         payload_str = msg.payload.decode('utf-8')
-
-        try:
+        for i in range(1):
+        #try:
             if topic == TOPIC_TASK_DISPATCH:
                 # Handle JSON commands from Coordinator
                 self.process_command_json(payload_str)
@@ -108,8 +108,8 @@ class WarehouseGateway:
                 # Handle Raw Sensor Data [cite: 178]
                 self.process_sensor_data(topic, payload_str)
 
-        except Exception as e:
-            print(f"Error processing message on {topic}: {e}")
+        #except Exception as e:
+        #    print(f"Error processing message on {topic}: {e}")
 
     # ------------------------------------------
     # UDP SERVER (System Monitor Alerts)
@@ -185,20 +185,23 @@ class WarehouseGateway:
 
             # 2. STORE IN INFLUXDB (Client 3 Usage) [cite: 180]
             # In Client 3, we simply call .write() on the client instance
-            if "robot_id" in data:
-
-                point = Point("Robots_status").tag("robot_id", data["robot_id"]).tag("status", data["status"]).field("location", data["location_id"]).field("battery", float(data["battery"]))
-                self.influx_client.write(record=point)
             if "asset_id" in data:
                 if data["type"]=="SHELF":
                     point = Point("Shelves").tag("asset_id", data["asset_id"]).field("stock", data["stock_units"])
                     self.influx_client.write(record=point)
             internal_topic = ""
             if "/amr/" in topic:
+                point = Point("Robots_status").tag("robot_id", data["robot_id"]).field("status", data["status"]).field("location", data["location_id"]).field("battery", float(data["battery"]))
+                self.influx_client.write(record=point)
                 robot_id = data.get("robot_id", "unknown")
                 internal_topic = f"{GROUP_ID}/internal/amr/{robot_id}/status"
             elif "/locations/" in topic:
-                asset_id = data.get("asset_id", "unknown")
+                asset_id = data["asset id"]
+                print(asset_id)
+                if data["type"]=="SHELF":
+                    point = Point("Shelves").tag("asset_id", data["asset id"]).field("stock", data["stock_units"])
+                    self.influx_client.write(record=point)
+
                 internal_topic = f"{GROUP_ID}/internal/static/{asset_id}/status"
 
             if internal_topic:
@@ -206,8 +209,8 @@ class WarehouseGateway:
 
         except json.JSONDecodeError:
             print("Failed to decode sensor JSON")
-        except Exception as e:
-            print(f"InfluxDB Write Error: {e}")
+        #except Exception as e:
+        #    print(f"InfluxDB Write Error: {e}")
 
     # ------------------------------------------
     # COMMAND ENCODING (Table 2)

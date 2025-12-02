@@ -128,12 +128,17 @@ class Shelf:
 
     def run(self):
         """Main execution loop"""
-        self.connect()
-        while True:
-            if self.config["stock"]<=0:
-                self.refill()
-            self.publish_status()
-            time.sleep(self.update_time)
+        try:
+            self.connect()
+            while True:
+                if self.config["stock"]<=0:
+                    self.refill()
+                self.publish_status()
+                time.sleep(self.update_time)
+        except KeyboardInterrupt:
+            print("Stopping Sensor...")
+            self.client.loop_stop()
+            self.client.disconnect()
 
     def publish_status(self):
         """Publishes the current configuration state to MQTT"""
