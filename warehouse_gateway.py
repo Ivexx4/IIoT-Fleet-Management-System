@@ -16,8 +16,8 @@ from influxdb_client_3 import InfluxDBClient3,Point
 # CONFIGURATION
 # ==========================================
 GROUP_ID = "2024209219"  # Replace with your actual Group ID (Student Number) [cite: 110]
-MQTT_BROKER = "localhost"  # Or "srsa-pi-8.dei.uc.pt" if onsite [cite: 162]
-
+#MQTT_BROKER = "localhost"  # Or "" if onsite [cite: 162]
+MQTT_BROKER = "srsa-pi-8.dei.uc.pt"
 MQTT_PORT = 1883
 UDP_IP = "0.0.0.0"
 # UDP Configuration (Alert Server)
@@ -114,27 +114,50 @@ class WarehouseGateway:
     # ------------------------------------------
     # UDP SERVER (System Monitor Alerts)
     # ------------------------------------------
+        # ------------------------------------------
+        # UDP SERVER (System Monitor Alerts)
+        # ------------------------------------------
     def run_udp_server(self):
-        """
-        Receives high-priority alert messages from the System Monitor on port 9090[cite: 177].
-        """
-        print(f"UDP Server listening on port {UDP_PORT}...")
-        while True:
-            try:
-                data, addr = self.udp_sock.recvfrom(1024)
-                message = data.decode('utf-8')
-                print(f"Received UDP Alert from {addr}: {message}")
+            """
+            Receives high-priority alert messages via UDP (Port 9090).
+            Parses JSON from System Monitor to trigger overrides.
+            """
+            print(f"UDP Server listening on port {UDP_PORT}...")
+            while True:
+                try:
+                    data, addr = self.udp_sock.recvfrom(1024)
+                    message = data.decode('utf-8')
+                    print(f"Received UDP Alert from {addr}: {message}")
 
-                # Check if it's an override command (FORCE_CHARGE)
-                if "FORCE_CHARGE" in message or "EXECUTE_TASK" in message:
-                    self.process_command_json(message)
-                else:
-                    # Log generic alerts to InfluxDB
-                    p = Point("system_alerts").tag("source", "UDP").field("message", message)
-                    self.influx_client.write(record=p)
+                    try:
+                        # Tentar fazer parse do JSON do System Monitor
+                        alert_data = json.loads(message)
 
-            except Exception as e:
-                print(f"UDP Error: {e}")
+                        # Registar alerta no InfluxDB
+                        p = Point("system_alerts") \
+                            .tag("source", "UDP") \
+                            .tag("level", alert_data.get("level", "INFO")) \
+                            .field("message", str(alert_data))
+                        self.influx_client.write(record=p)
+
+                        # Verificar se é um Override Command (FORCE_CHARGE) [cite: 219]
+                        if "override_task" in alert_data and "robot_id" in alert_data:
+                            # Construir o comando interno para processamento
+                            command_payload = {
+                                "robot_id": alert_data["robot_id"],
+                                "command": alert_data["override_task"],
+                                # Para Force Charge, shelf e station são irrelevantes, mas enviamos 0
+                                "target_shelf_id": 0,
+                                "target_station_id": 0
+                            }
+                            # Enviar comando binário imediato para o robô
+                            self.process_command_json(json.dumps(command_payload))
+
+                    except json.JSONDecodeError:
+                        print(f"UDP Error: Failed to parse JSON from {message}")
+
+                except Exception as e:
+                    print(f"UDP Server Error: {e}")
 
     # ------------------------------------------
     # SENSOR DATA PROCESSING & STANDARDIZATION
@@ -189,9 +212,15 @@ class WarehouseGateway:
     # ------------------------------------------
     # COMMAND ENCODING (Table 2)
     # ------------------------------------------
+    # ------------------------------------------
+    # COMMAND ENCODING (Table 2)
+    # ------------------------------------------
     def process_command_json(self, json_str):
         """
-        Translates JSON commands into 3-byte binary format and publishes to specific robot[cite: 185, 189].
+        Translates JSON commands into 3-byte binary format.
+        Byte 1: Command (0x01 Task, 0x03 Charge)
+        Byte 2: Shelf ID
+        Byte 3: Station ID
         """
         try:
             cmd_data = json.loads(json_str)
@@ -204,55 +233,56 @@ class WarehouseGateway:
             # --- BYTE 1: Command Type ---
             cmd_type_str = cmd_data.get("command", "")
             cmd_byte = 0x00
+            shelf_byte = 0x00
+            station_byte = 0x00
 
-            if cmd_type_str == "EXECUTE_TASK":
-                cmd_byte = 0x01
-            elif cmd_type_str == "FORCE_CHARGE":
+            if cmd_type_str == "FORCE_CHARGE":
+                # [cite: 187] Override command
                 cmd_byte = 0x03
+                # Em Force Charge, ignoramos o destino (vai para a estação de carga)
+                shelf_byte = 0
+                station_byte = 0
+
+            elif cmd_type_str == "EXECUTE_TASK":
+                # [cite: 187] Execute Task command
+                cmd_byte = 0x01
+
+                # --- BYTE 2: Target Shelf ID ---
+                shelf_raw = cmd_data.get("target_shelf_id", "S0")
+                if isinstance(shelf_raw, str):
+                    nums = re.findall(r'\d+', shelf_raw)
+                    if nums: shelf_byte = int(nums[0])
+                elif isinstance(shelf_raw, int):
+                    shelf_byte = shelf_raw
+
+                # --- BYTE 3: Target Station ID ---
+                station_raw = cmd_data.get("target_station_id", "P0")
+                if isinstance(station_raw, str):
+                    nums = re.findall(r'\d+', station_raw)
+                    if nums: station_byte = int(nums[0])
+                elif isinstance(station_raw, int):
+                    station_byte = station_raw
             else:
-                print(f"Unknown command type: {cmd_type_str}")
+                print(f"Unknown or Invalid command type: {cmd_type_str}")
                 return
-
-            # --- BYTE 2: Target Shelf ID ---
-            shelf_raw = cmd_data.get("target_shelf_id", "S0")
-            shelf_byte = 0
-            if isinstance(shelf_raw, str):
-                nums = re.findall(r'\d+', shelf_raw)
-                if nums: shelf_byte = int(nums[0])
-            elif isinstance(shelf_raw, int):
-                shelf_byte = shelf_raw
-
-            # --- BYTE 3: Target Station ID ---
-            station_raw = cmd_data.get("target_station_id", "P0")
-            station_byte = 0
-            if isinstance(station_raw, str):
-                nums = re.findall(r'\d+', station_raw)
-                if nums: station_byte = int(nums[0])
-            elif isinstance(station_raw, int):
-                station_byte = station_raw
 
             # --- ENCODING & SENDING ---
             # Struct format 'BBB' = 3 unsigned chars (1 byte each) -> Total 3 Bytes [cite: 184]
             binary_payload = struct.pack('BBB', cmd_byte, shelf_byte, station_byte)
 
-            # Topic: warehouse/{GroupID}/amr/{robot_id}/command [cite: 104]
+            # Topic: warehouse/{GroupID}/amr/{robot_id}/command [cite: 102]
             target_topic = f"warehouse/{GROUP_ID}/amr/{robot_id}/command"
 
             print(f"Sending Binary Command to {target_topic}: {binary_payload.hex().upper()}")
             self.mqtt_client.publish(target_topic, binary_payload)
 
-            try:
-                point = Point("Task_History") \
-                    .tag("robot_id", robot_id) \
-                    .tag("command_type", cmd_type_str) \
-                    .field("target_shelf", str(shelf_raw)) \
-                    .field("target_station", str(station_raw))
-
-                self.influx_client.write(record=point)
-                print(f"[{robot_id}] Comando registado no InfluxDB.")
-            except Exception as e:
-                print(f"Erro ao gravar comando no InfluxDB: {e}")
-
+            # Log command to InfluxDB
+            p = Point("Task_History") \
+                .tag("robot_id", robot_id) \
+                .tag("command_type", cmd_type_str) \
+                .field("target_shelf_byte", shelf_byte) \
+                .field("target_station_byte", station_byte)
+            self.influx_client.write(record=p)
 
         except Exception as e:
             print(f"Error encoding command: {e}")
