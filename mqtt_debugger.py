@@ -2,11 +2,7 @@
 import sys
 import paho.mqtt.client as mqtt_subscribe  # import library
 from datetime import datetime
-
-GROUP_ID = "2024209219"
-#MQTT_BROKER ="localhost"
-MQTT_BROKER = "srsa-pi-8.dei.uc.pt"
-MQTT_PORT = 1883
+from mqqtt_config import MQTT_BROKER,MQTT_PORT,GROUP_ID
 
 TOPIC_WAREHOUSE = f"warehouse/{GROUP_ID}/#"
 TOPIC_INTERNAL = f"{GROUP_ID}/internal/#"

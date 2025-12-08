@@ -3,12 +3,7 @@ import socket
 import time
 import threading
 import paho.mqtt.client as mqtt
-
-# --- CONFIGURAÇÃO ---
-GROUP_ID = "2024209219"  # Teu ID
-MQTT_BROKER = "srsa-pi-8.dei.uc.pt"
-# MQTT_BROKER = "localhost" # Alternativa se estiveres a correr localmente
-MQTT_PORT = 1883
+from mqqtt_config import MQTT_BROKER,MQTT_PORT,GROUP_ID
 UDP_IP = "0.0.0.0"
 
 # Porta para receber encomendas do cliente
@@ -70,7 +65,6 @@ class FleetCoordinator:
         try:
             topic = msg.topic
             payload = json.loads(msg.payload.decode())
-
             # Atualizar Estado dos Robôs
             if "/internal/amr/" in topic:
                 r_id = payload.get("robot_id")
@@ -79,7 +73,7 @@ class FleetCoordinator:
 
             # Atualizar Estado das Prateleiras
             elif "/internal/static/" in topic:
-                s_id = payload.get("asset_id")
+                s_id = payload.get("asset id")
                 if s_id:
                     self.shelves[s_id] = payload
 
