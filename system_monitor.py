@@ -4,12 +4,8 @@ import time
 import threading
 import paho.mqtt.client as mqtt
 from datetime import datetime
+from mqqtt_config import GROUP_ID,MQTT_BROKER,MQTT_PORT
 
-# --- CONFIGURAÇÃO ---
-GROUP_ID = "2024209219"  # Teu ID
-MQTT_BROKER = "srsa-pi-8.dei.uc.pt"
-# MQTT_BROKER = "localhost"
-MQTT_PORT = 1883
 
 # Configuração UDP (Envia alertas para o Gateway)
 GATEWAY_IP = "127.0.0.1"  # O Gateway está a correr localmente
@@ -115,8 +111,8 @@ class SystemMonitor:
             alert_msg = None
 
             # 1. CHECK: LOW BATTERY [cite: 224]
-            # Se bateria < 15% E não está a carregar
-            if battery < BATTERY_THRESHOLD and status not in ["CHARGING", "MOVING_TO_CHARGE"]:
+            # Se bateria <= 15% E não está a carregar
+            if battery <= BATTERY_THRESHOLD and status not in ["CHARGING", "MOVING_TO_CHARGE"]:
                 alert_msg = {
                     "robot_id": r_id,
                     "level": "CRITICAL",
@@ -127,7 +123,7 @@ class SystemMonitor:
 
             # 2. CHECK: STALLED [cite: 222, 223]
             # Se status diz "MOVING..." mas a localização não muda há 30s
-            elif "MOVING" in status and (now - last_move) > STALL_TIMEOUT:
+            elif status=="STALLED":
                 alert_msg = {
                     "robot_id": r_id,
                     "level": "CRITICAL",

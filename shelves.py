@@ -6,11 +6,8 @@ import struct
 import argparse
 import paho.mqtt.client as mqtt
 from datetime import datetime, timezone
+from mqqtt_config import  MQTT_BROKER as BROKER_ADDRESS ,MQTT_PORT as BROKER_PORT
 
-# --- CONFIGURATION ---
-#BROKER_ADDRESS="localhost"
-BROKER_ADDRESS="srsa-pi-8.dei.uc.pt"
-BROKER_PORT=1883
 class Shelf:
     def __init__(self, group_id, zone_id, asset_id,update_time):
         self.group_id = group_id
@@ -106,7 +103,7 @@ class Shelf:
         try:
             print(f"--- Starting Shelf {self.asset_id} ({self.zone_id}) ---")
             print(f"Topic: {self.topic}")
-            self.client.connect(BROKER_ADDRESS, BROKER_PORT, 60)
+            self.client.connect(BROKER_ADDRESS, BROKER_PORT,200)
             self.client.loop_start()
         except Exception as e:
             print(f"Connection Failed: {e}")

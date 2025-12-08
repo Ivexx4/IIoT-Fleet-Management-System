@@ -10,15 +10,12 @@ from datetime import datetime
 import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
 from influxdb_client_3 import InfluxDBClient3,Point
-
+from mqqtt_config import GROUP_ID,MQTT_BROKER,MQTT_PORT
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
-GROUP_ID = "2024209219"  # Replace with your actual Group ID (Student Number) [cite: 110]
-#MQTT_BROKER = "localhost"  # Or "" if onsite [cite: 162]
-MQTT_BROKER = "srsa-pi-8.dei.uc.pt"
-MQTT_PORT = 1883
+
 UDP_IP = "0.0.0.0"
 # UDP Configuration (Alert Server)
 UDP_PORT = 9090  # [cite: 177]
@@ -98,8 +95,9 @@ class WarehouseGateway:
     def on_message(self, client, userdata, msg):
         topic = msg.topic
         payload_str = msg.payload.decode('utf-8')
-        for i in range(1):
-        #try:
+        try:
+            if topic.endswith("/command"):
+                return
             if topic == TOPIC_TASK_DISPATCH:
                 # Handle JSON commands from Coordinator
                 self.process_command_json(payload_str)
@@ -108,8 +106,8 @@ class WarehouseGateway:
                 # Handle Raw Sensor Data [cite: 178]
                 self.process_sensor_data(topic, payload_str)
 
-        #except Exception as e:
-        #    print(f"Error processing message on {topic}: {e}")
+        except Exception as e:
+            print(f"Error processing message on {topic}: {e}")
 
     # ------------------------------------------
     # UDP SERVER (System Monitor Alerts)
@@ -132,12 +130,11 @@ class WarehouseGateway:
                     try:
                         # Tentar fazer parse do JSON do System Monitor
                         alert_data = json.loads(message)
-
+                        if not alert_data["message"]:
+                            return
                         # Registar alerta no InfluxDB
                         p = Point("system_alerts") \
-                            .tag("source", "UDP") \
-                            .tag("level", alert_data.get("level", "INFO")) \
-                            .field("message", str(alert_data))
+                            .field("message", alert_data.get("message"))
                         self.influx_client.write(record=p)
 
                         # Verificar se é um Override Command (FORCE_CHARGE) [cite: 219]
@@ -197,7 +194,6 @@ class WarehouseGateway:
                 internal_topic = f"{GROUP_ID}/internal/amr/{robot_id}/status"
             elif "/locations/" in topic:
                 asset_id = data["asset id"]
-                print(asset_id)
                 if data["type"]=="SHELF":
                     point = Point("Shelves").tag("asset_id", data["asset id"]).field("stock", data["stock_units"])
                     self.influx_client.write(record=point)
@@ -209,8 +205,8 @@ class WarehouseGateway:
 
         except json.JSONDecodeError:
             print("Failed to decode sensor JSON")
-        #except Exception as e:
-        #    print(f"InfluxDB Write Error: {e}")
+        except Exception as e:
+            print(f"InfluxDB Write Error: {e}")
 
     # ------------------------------------------
     # COMMAND ENCODING (Table 2)
@@ -281,10 +277,10 @@ class WarehouseGateway:
 
             # Log command to InfluxDB
             p = Point("Task_History") \
-                .tag("robot_id", robot_id) \
-                .tag("command_type", cmd_type_str) \
-                .field("target_shelf_byte", shelf_byte) \
-                .field("target_station_byte", station_byte)
+                .field("robot_id", robot_id) \
+                .field("command_type", cmd_type_str) \
+                .field("target_shelf","S"+str(shelf_byte)) \
+                .field("target_station","P"+str(station_byte))
             self.influx_client.write(record=p)
 
         except Exception as e:

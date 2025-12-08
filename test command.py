@@ -3,7 +3,7 @@ import struct
 import time
 
 # Configuration (Match these with your robot's settings)
-#BROKER = "srsa-pi-8.dei.uc.pt"
+BROKER = "srsa-pi-8.dei.uc.pt"
 #BROKER ="https://test.mosquitto.org/"
 BROKER ="localhost"
 PORT = 1883
@@ -43,7 +43,7 @@ if __name__ == "__main__":
     #for i in range(200):
     #    send_task(5, 2)
     #    time.sleep(120)
-     #   send_charge()
+    #send_charge()
 
     # Example: Force Charge
     send_task(1, 1)
