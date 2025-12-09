@@ -170,7 +170,7 @@ class WarehouseGateway:
 
             # --- [NOVO] LÓGICA PARA AS STATIONS (Packing Stations) ---
             # Deteta se a mensagem vem de uma estação (loading_station.py)
-            if "/station/" in topic:
+            if "station" in topic:
                 if "station_id" in data and "status" in data:
                     # Grava no InfluxDB na tabela 'Stations'
                     # Guardamos 'status' (texto) para Timeline e 'is_busy' (número) para gráficos simples
@@ -221,7 +221,6 @@ class WarehouseGateway:
 
             # Se for PRATELEIRA (Shelf)
             elif "/locations/" in topic:
-                # Só processa se for do tipo SHELF e tiver ID
                 if data.get("type") == "SHELF" and "asset id" in data:
                     asset_id = data["asset id"]
                     point = Point("Shelves") \

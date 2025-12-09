@@ -47,9 +47,9 @@ $PYTHON_CMD shelves.py 2024209219 storage-b S9 2 &
 sleep 0.1
 $PYTHON_CMD shelves.py 2024209219 storage-b S10 2 &
 sleep 0.1
-$PYTHON_CMD loading_station.py P1 &
+$PYTHON_CMD loading_station.py 2024209219 P1 &
 sleep 0.1
-$PYTHON_CMD loading_station.py P2 &
+$PYTHON_CMD loading_station.py 2024209219 P2 &
 sleep 0.1
 $PYTHON_CMD amr_robot.py 2024209219 RBT1 &
 sleep 0.1

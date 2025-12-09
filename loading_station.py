@@ -102,6 +102,7 @@ class LoadingStation:
     def publish_status(self):
         """Publica o estado atual da estação via MQTT."""
         # Se estiver a processar, indica o tempo restante
+        print("A Publicar:")
         time_remaining = 0
         if self.status == "PROCESSING":
             time_remaining = max(0.0, PROCESSING_TIME - (time.time() - self.state_start_time))
@@ -113,6 +114,7 @@ class LoadingStation:
             "delivery_info": self.current_delivery,
             "time_remaining_s": round(time_remaining, 1)
         }
+        print(payload)
         self.client.publish(self.topic_pub, json.dumps(payload))
 
     def run(self):
