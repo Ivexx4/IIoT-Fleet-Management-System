@@ -134,7 +134,9 @@ class WarehouseGateway:
                             return
                         # Registar alerta no InfluxDB
                         p = Point("system_alerts") \
-                            .field("message", alert_data.get("message"))
+                            .field("message", alert_data.get("message"))\
+                            .field("robot_id", alert_data.get("robot_id"))
+
                         self.influx_client.write(record=p)
 
                         # Verificar se é um Override Command (FORCE_CHARGE) [cite: 219]
@@ -166,10 +168,32 @@ class WarehouseGateway:
         try:
             data = json.loads(payload_str)
 
-            # 1. STANDARDIZATION (Table 1)
-            # storage-a: Already in units (1 unit = 23kg).
-            # storage-b: In kg. Needs conversion: Units = kg / 23.
+            # --- [NOVO] LÓGICA PARA AS STATIONS (Packing Stations) ---
+            # Deteta se a mensagem vem de uma estação (loading_station.py)
+            if "/station/" in topic:
+                if "station_id" in data and "status" in data:
+                    # Grava no InfluxDB na tabela 'Stations'
+                    # Guardamos 'status' (texto) para Timeline e 'is_busy' (número) para gráficos simples
+                    is_busy = 1 if data["status"] == "PROCESSING" else 0
 
+                    point = Point("Stations") \
+                        .tag("station_id", data["station_id"]) \
+                        .field("status", data["status"]) \
+                        .field("is_busy", is_busy)
+
+                    self.influx_client.write(record=point)
+
+                    # Opcional: Publicar no tópico interno para manter consistência
+                    internal_topic = f"{GROUP_ID}/internal/station/{data['station_id']}/status"
+                    self.mqtt_client.publish(internal_topic, json.dumps(data))
+
+                # Retorna aqui para não misturar com a lógica de stock/robôs abaixo
+                return
+
+                # --- LÓGICA EXISTENTE (PRATELEIRAS E ROBÔS) ---
+
+            # 1. STANDARDIZATION (Table 1)
+            # storage-b: In kg. Needs conversion: Units = kg / 23.
             if "storage-b" in topic or ("zone_id" in data and data["zone_id"] == "storage-b"):
                 if "stock" in data:
                     raw_kg = float(data["stock"])
@@ -180,33 +204,44 @@ class WarehouseGateway:
                 # Assume storage-a or others are already units
                 data["stock_units"] = int(data["stock"])
 
-            # 2. STORE IN INFLUXDB (Client 3 Usage) [cite: 180]
-            # In Client 3, we simply call .write() on the client instance
-            if "asset_id" in data:
-                if data["type"]=="SHELF":
-                    point = Point("Shelves").tag("asset_id", data["asset_id"]).field("stock", data["stock_units"])
-                    self.influx_client.write(record=point)
+            # 2. STORE IN INFLUXDB (Client 3 Usage) & PREPARE INTERNAL TOPIC
             internal_topic = ""
+
+            # Se for ROBÔ
             if "/amr/" in topic:
-                point = Point("Robots_status").tag("robot_id", data["robot_id"]).field("status", data["status"]).field("location", data["location_id"]).field("battery", float(data["battery"]))
+                point = Point("Robots_status") \
+                    .tag("robot_id", data.get("robot_id", "unknown")) \
+                    .field("status", data.get("status", "UNKNOWN")) \
+                    .field("location", data.get("location_id", "UNKNOWN")) \
+                    .field("battery", float(data.get("battery", 0)))
                 self.influx_client.write(record=point)
+
                 robot_id = data.get("robot_id", "unknown")
                 internal_topic = f"{GROUP_ID}/internal/amr/{robot_id}/status"
+
+            # Se for PRATELEIRA (Shelf)
             elif "/locations/" in topic:
-                asset_id = data["asset id"]
-                if data["type"]=="SHELF":
-                    point = Point("Shelves").tag("asset_id", data["asset id"]).field("stock", data["stock_units"])
+                # Só processa se for do tipo SHELF e tiver ID
+                if data.get("type") == "SHELF" and "asset id" in data:
+                    asset_id = data["asset id"]
+                    point = Point("Shelves") \
+                        .tag("asset_id", asset_id) \
+                        .field("stock", data.get("stock_units", 0))
                     self.influx_client.write(record=point)
 
-                internal_topic = f"{GROUP_ID}/internal/static/{asset_id}/status"
-
+                    internal_topic = f"{GROUP_ID}/internal/static/{asset_id}/status"
+                if data.get("type") == "LOADING_STATION":
+                    point = Point("Stations") \
+                        .tag("station_id", data["asset id"]) \
+                        .field("status", data.get("status", "UNKNOWN"))
+                    # 3. PUBLICAR NO TÓPICO INTERNO (apenas se foi definido acima)
             if internal_topic:
                 self.mqtt_client.publish(internal_topic, json.dumps(data))
 
         except json.JSONDecodeError:
             print("Failed to decode sensor JSON")
         except Exception as e:
-            print(f"InfluxDB Write Error: {e}")
+            print(f"InfluxDB Write/Processing Error: {e}")
 
     # ------------------------------------------
     # COMMAND ENCODING (Table 2)

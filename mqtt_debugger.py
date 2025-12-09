@@ -7,7 +7,6 @@ from mqqtt_config import MQTT_BROKER,MQTT_PORT,GROUP_ID
 TOPIC_WAREHOUSE = f"warehouse/{GROUP_ID}/#"
 TOPIC_INTERNAL = f"{GROUP_ID}/internal/#"
 
-
 def on_connect(client, userdata, flags, reason_code, properties):
     if reason_code == 0:
         print(f"✅ Ligado ao Broker MQTT ({MQTT_BROKER})!")
