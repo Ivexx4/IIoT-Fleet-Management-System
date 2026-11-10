@@ -17,11 +17,11 @@ O sistema é composto pelos seguintes módulos principais:
 
 | Componente | Script Python | Função Principal descrita no Relatório |
 | :--- | :--- | :--- |
-| **Warehouse Gateway** | `src/warehouse_gateway.py` | **Ponte Central e Tradutor**. Realiza a normalização de dados (Semantic Adapter) e a tradução de protocolo (JSON $\to$ Binário). Aloja o Servidor de Alertas UDP (Porta 9090). |
-| **Fleet Coordinator** | `src/fleet_coordinator.py` | **Cérebro**. Mantém o "World State" em tempo real. Executa a lógica de *Task Allocation* usando um algoritmo heurístico *greedy*. [cite_start]Aloja o Servidor de Encomendas UDP (Porta 9091). |
-| **System Monitor** | `src/system_monitor.py` | **Tolerância a Falhas**. [cite_start]Analisa a telemetria para detetar anomalias (Stall, Bateria Crítica) e envia comandos de *override* via UDP. |
-| **AMR Simulator** | `src/amr_robot.py` | Simula a máquina de estados finitos do robô, decaimento de bateria ($1\%/s$) e falhas estocásticas (5% probabilidade de `STALLED`). |
-| **Smart Infrastructure** | `src/shelves.py`, `src/loading_station.py` | [cite_start]Ativos estáticos que reagem autonomamente (decremento de stock no `PICKING`, auto-reabastecimento após 2s). |
+| **Warehouse Gateway** | `warehouse_gateway.py` | **Ponte Central e Tradutor**. Realiza a normalização de dados (Semantic Adapter) e a tradução de protocolo (JSON $\to$ Binário). Aloja o Servidor de Alertas UDP (Porta 9090). |
+| **Fleet Coordinator** | `fleet_coordinator.py` | **Cérebro**. Mantém o "World State" em tempo real. Executa a lógica de *Task Allocation* usando um algoritmo heurístico *greedy*. [cite_start]Aloja o Servidor de Encomendas UDP (Porta 9091). |
+| **System Monitor** | `system_monitor.py` | **Tolerância a Falhas**. [cite_start]Analisa a telemetria para detetar anomalias (Stall, Bateria Crítica) e envia comandos de *override* via UDP. |
+| **AMR Simulator** | `amr_robot.py` | Simula a máquina de estados finitos do robô, decaimento de bateria ($1\%/s$) e falhas estocásticas (5% probabilidade de `STALLED`). |
+| **Smart Infrastructure** | `shelves.py`, `loading_station.py` | [cite_start]Ativos estáticos que reagem autonomamente (decremento de stock no `PICKING`, auto-reabastecimento após 2s). |
 
 ---
 
@@ -86,71 +86,42 @@ Os dados são persistidos no **InfluxDB Cloud** e visualizados em dois dashboard
 
 ## 🚀 Instruções de Execução
 
-### Pré-requisitos
-* **Python 3.8+**
-* **Broker:** Mosquitto
-* **Bibliotecas:** `paho-mqtt`, `influxdb3-python`
+### Executar a stack completa
 
-### Configuração
-
-O broker MQTT pode ser definido com `MQTT_BROKER` e `MQTT_PORT`. Por omissão, o sistema usa `127.0.0.1:1883`. O identificador do armazém dos serviços centrais pode ser alterado com `WAREHOUSE_GROUP_ID`.
-
-O Gateway precisa de credenciais InfluxDB fornecidas pelo ambiente; não coloque tokens no código nem os envie para o GitHub. Configure `INFLUX_TOKEN` e, se necessário, `INFLUX_URL`, `INFLUX_ORG` e `INFLUX_BUCKET`.
-
-Se já publicou uma versão deste projeto com um token, revogue-o no InfluxDB e crie outro: remover o segredo do código atual não o elimina do histórico Git.
-
-Use o mesmo `WAREHOUSE_GROUP_ID` nos simuladores e serviços centrais; os comandos abaixo usam `demo`.
-
-Exemplo em PowerShell:
-```powershell
-$env:WAREHOUSE_GROUP_ID = "demo"
-$env:MQTT_BROKER = "127.0.0.1"
-$env:MQTT_PORT = "1883"
-$env:INFLUX_TOKEN = "<token-InfluxDB>"
-```
-
-Exemplo em Bash:
-```bash
-export WAREHOUSE_GROUP_ID=demo
-export MQTT_BROKER=127.0.0.1
-export MQTT_PORT=1883
-export INFLUX_TOKEN="<token-InfluxDB>"
-```
-
-Instale as dependências antes de iniciar os serviços:
-```bash
-python -m pip install -r requirements.txt
-```
-
-### 1. Iniciar Infraestrutura Central
-Abra terminais distintos para cada serviço:
+Requisitos: Docker Desktop (ou Docker Engine) com Docker Compose v2.
 
 ```bash
-# Gateway (Ponte MQTT/UDP e InfluxDB)
-python src/warehouse_gateway.py
-
-# Coordinator (Gestor de Tarefas e Servidor UDP 9091)
-python src/fleet_coordinator.py
-
-# System Monitor (Monitorização de Saúde e Cliente UDP 9090)
-python src/system_monitor.py
-
-# (Opcional) Debugger de Rede
-python src/mqtt_debugger.py
+cp .env.example .env
+docker compose up --build --scale amr=4 -d
+docker compose ps
 ```
 
-### 2. Iniciar Simuladores de Ativos
+No PowerShell, copie a configuração com `Copy-Item .env.example .env`. Os valores do `.env.example` são apenas para uma demonstração local; altere todas as palavras-passe e tokens antes de expor serviços ou usar fora da máquina local. O ficheiro `.env` está ignorado pelo Git.
+
+Um único comando inicia Mosquitto com TLS e autenticação, InfluxDB, Redis, Grafana, Gateway, Coordinator, System Monitor, simuladores de prateleiras/estações e quatro AMRs. Para alterar a dimensão da frota, mude `--scale amr=4`.
+
+* Grafana: <http://localhost:3000> (credenciais iniciais no `.env`).
+* O broker MQTT TLS fica disponível apenas em `localhost:8883`; a CA local é criada no primeiro arranque e guardada num volume Docker.
+* As encomendas UDP do host são enviadas para `127.0.0.1:9091`:
+  ```bash
+  python src/client_order_injector.py --item item_A --qty 5 --station P1
+  ```
+* `docker compose down` pára a stack e mantém os dados. `docker compose down -v` também apaga os dados persistidos.
+
+### Componentes e persistência
+
+O Coordinator persiste estado de robôs, prateleiras, reservas e encomendas pendentes no Redis com AOF. O alocador usa o algoritmo Hungarian para minimizar globalmente o custo das tarefas disponíveis; o custo de rota Manhattan usa uma grelha de demonstração definida em `src/task_allocator.py`, não um mapa físico do armazém.
+
+As mensagens de entrada são validadas com modelos Pydantic. Telemetria e comandos MQTT usam QoS 1; os AMRs publicam Last Will and Testament para sinalizar desconexões. Alertas críticos usam UDP com ACK e repetição, e recorrem a MQTT QoS 1 caso não recebam confirmação.
+
+### Desenvolvimento e validação
+
 ```bash
-# Simular um Robô (Ex: AMR-1)
-python src/amr_robot.py demo AMR-1
-
-# Simular uma Prateleira (Ex: Zona A, S1)
-python src/shelves.py demo storage-a S1 10
-
-# Simular uma Estação
-python src/loading_station.py demo P1
+python -m pip install -r requirements-dev.txt
+ruff check .
+ruff format --check .
+mypy
+pytest -q
 ```
-### 3. Injeção de Encomendas (Cliente) 
-```bash
-python src/client_order_injector.py --item item_A --qty 5 --station P1
-```
+
+O GitHub Actions executa lint, formatação, mypy e pytest em cada push e pull request.
