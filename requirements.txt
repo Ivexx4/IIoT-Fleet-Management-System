@@ -3,11 +3,3 @@ influxdb-client==1.48.0
 redis==5.2.1
 pydantic==2.12.5
 python-dotenv==1.0.1
-booktype
-task-allocator
-automium-web
-pytest
-task-allocator
-protocol
-automium-web
-pytest
