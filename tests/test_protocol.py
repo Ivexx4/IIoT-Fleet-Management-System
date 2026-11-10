@@ -2,39 +2,42 @@ import pytest
 
 from models import Order, RobotTelemetry
 from protocol import decode_command, encode_command, normalize_stock
-from task_allocator import minimum_cost_assignment, route_cost
+from task_allocator import minimum_cost_assignment, route_cost, segment_travel_time
 
 
 def test_task_command_binary_round_trip() -> None:
-    payload = encode_command("EXECUTE_TASK", "S6", "P2")
-    assert len(payload) == 3
-    assert decode_command(payload) == (0x01, 6, 2)
+    payload = encode_command("EXECUTE_TASK", "S6", "P2", 7)
+    assert len(payload) == 4
+    assert decode_command(payload) == (0x01, 6, 2, 7)
 
 
 def test_force_charge_command_binary_round_trip() -> None:
-    assert decode_command(encode_command("FORCE_CHARGE")) == (0x03, 0, 0)
+    assert decode_command(encode_command("FORCE_CHARGE")) == (0x03, 0, 0, 0)
 
 
 @pytest.mark.parametrize(
-    ("command", "shelf", "station"),
+    ("command", "shelf", "station", "quantity"),
     [
-        ("UNKNOWN", "S1", "P1"),
-        ("EXECUTE_TASK", "not-a-shelf", "P1"),
-        ("EXECUTE_TASK", "S256", "P1"),
-        ("EXECUTE_TASK", "S1", "P256"),
+        ("UNKNOWN", "S1", "P1", 1),
+        ("EXECUTE_TASK", "not-a-shelf", "P1", 1),
+        ("EXECUTE_TASK", "S256", "P1", 1),
+        ("EXECUTE_TASK", "S1", "P256", 1),
+        ("EXECUTE_TASK", "S1", "P1", 0),
+        ("EXECUTE_TASK", "S1", "P1", 256),
     ],
 )
 def test_rejects_invalid_command_identifiers(
     command: str,
     shelf: str,
     station: str,
+    quantity: int,
 ) -> None:
     with pytest.raises(ValueError):
-        encode_command(command, shelf, station)
+        encode_command(command, shelf, station, quantity)
 
 
 def test_rejects_wrong_command_size() -> None:
-    with pytest.raises(ValueError, match="exactly 3 bytes"):
+    with pytest.raises(ValueError, match="exactly 4 bytes"):
         decode_command(b"\x01\x02")
 
 
@@ -70,12 +73,14 @@ def test_hungarian_assignment_rejects_invalid_matrix() -> None:
 
 
 def test_route_estimate_includes_shelf_to_station_leg() -> None:
-    assert route_cost("DOCK", "S1", "P1") == 9
+    assert route_cost("DOCK", "S1", "P1") > 9 * segment_travel_time(1.0)
 
 
 def test_message_models_validate_external_payloads() -> None:
     assert Order(item="item_A", quantity=5).pack_station == "P1"
     with pytest.raises(ValueError):
         Order(item="item_A", quantity=0)
+    with pytest.raises(ValueError):
+        Order(item="item_A", quantity=256)
     with pytest.raises(ValueError):
         RobotTelemetry(robot_id="R1", battery=101, status="IDLE")

@@ -107,7 +107,7 @@ services:
 
   amr:
     build: .
-    command: ["python", "src/amrrobot.py", "${WAREHOUSE_GROUP_ID:-demo}"]
+    command: ["python", "src/amr_robot.py", "${WAREHOUSE_GROUP_ID:-demo}"]
     environment: *app-environment
     volumes:
       - mqtt-certs:/run/mqtt-certs:ro

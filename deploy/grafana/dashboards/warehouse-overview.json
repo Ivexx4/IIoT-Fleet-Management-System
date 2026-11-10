@@ -40,7 +40,7 @@
             "type": "influxdb",
             "uid": "warehouse-influxdb"
           },
-          "query": "from(bucket: v.defaultBucket) |> range(start: -1h) |> filter(fn: (r) => r._measurement == \"Robots_status\" and r._field == \"battery\") |> aggregateWindow(every: 10s, fn: last, createEmpty: false)",
+          "query": "from(bucket: v.defaultBucket) |> range(start: v.timeRangeStart) |> filter(fn: (r) => r._measurement == \"Robots_status\" and r._field == \"battery\") |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)",
           "refId": "A"
         }
       ],
@@ -77,12 +77,155 @@
             "type": "influxdb",
             "uid": "warehouse-influxdb"
           },
-          "query": "from(bucket: v.defaultBucket) |> range(start: -1h) |> filter(fn: (r) => r._measurement == \"Shelves\" and r._field == \"stock\") |> aggregateWindow(every: 10s, fn: last, createEmpty: false)",
+          "query": "from(bucket: v.defaultBucket) |> range(start: v.timeRangeStart) |> filter(fn: (r) => r._measurement == \"Shelves\" and r._field == \"stock\") |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)",
           "refId": "A"
         }
       ],
       "title": "Shelf Stock",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "warehouse-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "id": 3,
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "warehouse-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket) |> range(start: v.timeRangeStart) |> filter(fn: (r) => r._measurement == \"Robots_status\" and r._field == \"status\") |> keep(columns: [\"_time\", \"_value\", \"robot_id\"]) |> group(columns: [\"robot_id\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "AMR State Timeline",
+      "type": "state-timeline"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "warehouse-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "warehouse-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket) |> range(start: v.timeRangeStart) |> filter(fn: (r) => r._measurement == \"Stations\" and r._field == \"is_busy\") |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)",
+          "refId": "A"
+        }
+      ],
+      "title": "Station Throughput (busy = 1)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "warehouse-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "id": 5,
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "warehouse-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket) |> range(start: v.timeRangeStart) |> filter(fn: (r) => r._measurement == \"Task_History\") |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\") |> keep(columns: [\"_time\", \"robot_id\", \"command_type\", \"target_shelf\", \"target_station\"]) |> sort(columns: [\"_time\"], desc: true)",
+          "refId": "A"
+        }
+      ],
+      "title": "Task History",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "warehouse-influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "id": 6,
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "warehouse-influxdb"
+          },
+          "query": "from(bucket: v.defaultBucket) |> range(start: v.timeRangeStart) |> filter(fn: (r) => r._measurement == \"system_alerts\") |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\") |> keep(columns: [\"_time\", \"robot_id\", \"level\", \"message\"]) |> sort(columns: [\"_time\"], desc: true)",
+          "refId": "A"
+        }
+      ],
+      "title": "System Alerts",
+      "type": "table"
     }
   ],
   "refresh": "10s",

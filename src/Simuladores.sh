@@ -30,11 +30,11 @@ $PYTHON_CMD loading_station.py 2024209219 P1 &
 sleep 0.1
 $PYTHON_CMD loading_station.py 2024209219 P2 &
 sleep 0.1
-$PYTHON_CMD amrrobot.py 2024209219 RBT1 &
+$PYTHON_CMD amr_robot.py 2024209219 RBT1 &
 sleep 0.1
-$PYTHON_CMD amrrobot.py 2024209219 RBT2 &
+$PYTHON_CMD amr_robot.py 2024209219 RBT2 &
 sleep 0.1
-$PYTHON_CMD amrrobot.py 2024209219 RBT3 &
+$PYTHON_CMD amr_robot.py 2024209219 RBT3 &
 sleep 0.1
-$PYTHON_CMD amrrobot.py 2024209219 RBT4 &
+$PYTHON_CMD amr_robot.py 2024209219 RBT4 &
 sleep 0.1

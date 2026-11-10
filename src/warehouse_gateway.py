@@ -34,6 +34,7 @@ UDP_PORT = 9090
 TOPIC_SENSORS = f"warehouse/{GROUP_ID}/#"
 TOPIC_TASK_DISPATCH = f"{GROUP_ID}/internal/tasks/dispatch"
 TOPIC_ALERT_FALLBACK = f"{GROUP_ID}/internal/alerts/udp-fallback"
+TOPIC_GATEWAY_AVAILABILITY = f"{GROUP_ID}/internal/gateway/availability"
 
 
 class WarehouseGateway:
@@ -44,6 +45,12 @@ class WarehouseGateway:
         self.mqtt_client = create_mqtt_client("warehouse-gateway")
         self.mqtt_client.on_connect = self.on_connect
         self.mqtt_client.on_message = self.on_message
+        self.mqtt_client.will_set(
+            TOPIC_GATEWAY_AVAILABILITY,
+            json.dumps({"status": "offline"}),
+            qos=MQTT_QOS,
+            retain=True,
+        )
         self.influx_client = InfluxDBClient(
             url=INFLUX_URL,
             token=INFLUX_TOKEN,
@@ -79,6 +86,12 @@ class WarehouseGateway:
 
     def close(self) -> None:
         self.udp_sock.close()
+        self.mqtt_client.publish(
+            TOPIC_GATEWAY_AVAILABILITY,
+            json.dumps({"status": "offline"}),
+            qos=MQTT_QOS,
+            retain=True,
+        )
         self.mqtt_client.loop_stop()
         self.mqtt_client.disconnect()
         self.write_api.close()
@@ -101,6 +114,12 @@ class WarehouseGateway:
                 (TOPIC_TASK_DISPATCH, MQTT_QOS),
                 (TOPIC_ALERT_FALLBACK, MQTT_QOS),
             ]
+        )
+        client.publish(
+            TOPIC_GATEWAY_AVAILABILITY,
+            json.dumps({"status": "online"}),
+            qos=MQTT_QOS,
+            retain=True,
         )
         print("Gateway connected to MQTT")
 
@@ -145,6 +164,8 @@ class WarehouseGateway:
                 .field("location", telemetry.location_id)
                 .field("battery", telemetry.battery)
             )
+            if telemetry.x is not None and telemetry.y is not None:
+                point.field("x", telemetry.x).field("y", telemetry.y)
             self.write_api.write(bucket=INFLUX_BUCKET, record=point)
             self.mqtt_client.publish(
                 f"{GROUP_ID}/internal/amr/{telemetry.robot_id}/status",
@@ -201,6 +222,7 @@ class WarehouseGateway:
             command.command,
             command.target_shelf_id,
             command.target_station_id,
+            command.quantity,
         )
         topic = f"warehouse/{GROUP_ID}/amr/{command.robot_id}/command"
         result = self.mqtt_client.publish(topic, binary_payload, qos=MQTT_QOS)

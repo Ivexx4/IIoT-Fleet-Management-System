@@ -7,7 +7,12 @@ from typing import Any
 
 import paho.mqtt.client as mqtt
 
-from models import RobotTelemetry, ShelfTelemetry
+from models import (
+    InfrastructureLocation,
+    LocationRequest,
+    RobotTelemetry,
+    ShelfTelemetry,
+)
 from mqtt_config import (
     GROUP_ID,
     MQTT_BROKER,
@@ -15,6 +20,7 @@ from mqtt_config import (
     MQTT_QOS,
     create_mqtt_client,
 )
+from task_allocator import location_coordinates
 
 
 class Shelf:
@@ -35,7 +41,12 @@ class Shelf:
         self.max_stock = self.config["stock"]
         self.lock = threading.Lock()
         self.refill_at: float | None = None
+        self.robots_picking: set[str] = set()
         self.topic_sub = f"warehouse/{group_id}/amr/+/status"
+        self.location_request_topic = (
+            f"{group_id}/internal/infrastructure/location/request"
+        )
+        self.location_report_topic = f"{group_id}/internal/infrastructure/location"
         self.topic = f"warehouse/{group_id}/locations/{zone_id}/{asset_id}/status"
         self.client = create_mqtt_client(f"{group_id}-{asset_id}")
         self.client.on_connect = self.on_connect
@@ -49,6 +60,8 @@ class Shelf:
         return {
             "asset id": self.asset_id,
             "type": "SHELF",
+            "zone_id": self.zone_id,
+            "location_id": f"SHELF-{self.asset_id}",
             "item id": item,
             "stock": stock,
             "unit": unit,
@@ -65,7 +78,12 @@ class Shelf:
         if reason_code.is_failure:
             print(f"[{self.asset_id}] MQTT connection failed: {reason_code}")
             return
-        client.subscribe(self.topic_sub, qos=MQTT_QOS)
+        client.subscribe(
+            [
+                (self.topic_sub, MQTT_QOS),
+                (self.location_request_topic, MQTT_QOS),
+            ]
+        )
         self.publish_status()
 
     def on_message(
@@ -74,19 +92,31 @@ class Shelf:
         userdata: Any,
         message: mqtt.MQTTMessage,
     ) -> None:
+        if message.topic == self.location_request_topic:
+            try:
+                LocationRequest.model_validate_json(message.payload)
+                self.publish_location()
+            except ValueError as error:
+                print(f"[{self.asset_id}] Rejected location request: {error}")
+            return
         try:
             robot = RobotTelemetry.model_validate_json(message.payload)
         except ValueError as error:
             print(f"[{self.asset_id}] Rejected robot telemetry: {error}")
             return
         if robot.location_id != f"SHELF-{self.asset_id}" or robot.status != "PICKING":
+            self.robots_picking.discard(robot.robot_id)
             return
+        if robot.robot_id in self.robots_picking:
+            return
+        self.robots_picking.add(robot.robot_id)
         with self.lock:
             stock = float(self.config["stock"])
-            amount_to_take = 5 * (23 if self.zone_id == "storage-b" else 1)
+            unit_weight = 23 if self.zone_id == "storage-b" else 1
+            amount_to_take = robot.load_quantity * unit_weight
             self.config["stock"] = max(0, stock - amount_to_take)
             if self.config["stock"] == 0:
-                self.refill_at = time.monotonic() + 2
+                self.refill_at = time.monotonic() + 15
         self.publish_status()
 
     def connect(self) -> None:
@@ -115,6 +145,7 @@ class Shelf:
                 **self.config,
                 "timestamp": datetime.now(UTC).isoformat(),
             }
+        data["x"], data["y"] = location_coordinates(f"SHELF-{self.asset_id}")
         payload = ShelfTelemetry.model_validate(data).model_dump_json(by_alias=True)
         result = self.client.publish(
             self.topic,
@@ -124,6 +155,24 @@ class Shelf:
         )
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
             print(f"[{self.asset_id}] MQTT rejected shelf telemetry")
+
+    def publish_location(self) -> None:
+        x, y = location_coordinates(f"SHELF-{self.asset_id}")
+        location = InfrastructureLocation(
+            asset_type="shelf",
+            asset_id=self.asset_id,
+            location_id=f"SHELF-{self.asset_id}",
+            zone_id=self.zone_id,
+            x=x,
+            y=y,
+        )
+        result = self.client.publish(
+            self.location_report_topic,
+            location.model_dump_json(),
+            qos=MQTT_QOS,
+        )
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            print(f"[{self.asset_id}] MQTT rejected location report")
 
     def run(self) -> None:
         self.connect()

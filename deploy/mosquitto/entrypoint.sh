@@ -9,7 +9,9 @@ if [ ! -s /mosquitto/data/ca.crt ] || [ ! -s /mosquitto/data/server.crt ]; then
     openssl req -x509 -newkey rsa:3072 -nodes -days 3650 \
         -keyout /mosquitto/data/ca.key \
         -out /mosquitto/data/ca.crt \
-        -subj "/CN=Warehouse MQTT Local CA"
+        -subj "/CN=Warehouse MQTT Local CA" \
+        -addext "basicConstraints=critical,CA:TRUE" \
+        -addext "keyUsage=critical,keyCertSign,cRLSign"
     openssl req -new -newkey rsa:2048 -nodes \
         -keyout /mosquitto/data/server.key \
         -out /mosquitto/data/server.csr \
