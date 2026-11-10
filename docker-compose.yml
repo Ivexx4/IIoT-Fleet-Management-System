@@ -10,6 +10,7 @@ x-app-environment: &app-environment
   INFLUX_TOKEN: ${INFLUX_TOKEN:-local-dev-token}
   INFLUX_ORG: ${INFLUX_ORG:-warehouse}
   INFLUX_BUCKET: ${INFLUX_BUCKET:-warehouse_data}
+  REDIS_URL: redis://redis:6379/0
 
 services:
   mosquitto:
@@ -72,13 +73,14 @@ services:
     command: ["python", "src/warehouse_gateway.py"]
     environment:
       <<: *app-environment
-      UDP_HMAC_SECRET: ${UDP_HMAC_SECRET:-local-demo-hmac-secret-change-before-deploy-0123456789}
     volumes:
       - mqtt-certs:/run/mqtt-certs:ro
     depends_on:
       mosquitto:
         condition: service_healthy
       influxdb:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
 
@@ -87,10 +89,6 @@ services:
     command: ["python", "src/fleet_coordinator.py"]
     environment:
       <<: *app-environment
-      REDIS_URL: redis://redis:6379/0
-      UDP_HMAC_SECRET: ${UDP_HMAC_SECRET:-local-demo-hmac-secret-change-before-deploy-0123456789}
-    ports:
-      - "${HOST_IP:-127.0.0.1}:9091:9091/udp"
     volumes:
       - mqtt-certs:/run/mqtt-certs:ro
     depends_on:
@@ -105,9 +103,6 @@ services:
     command: ["python", "src/system_monitor.py"]
     environment:
       <<: *app-environment
-      GATEWAY_IP: gateway
-      GATEWAY_PORT: "9090"
-      UDP_HMAC_SECRET: ${UDP_HMAC_SECRET:-local-demo-hmac-secret-change-before-deploy-0123456789}
     volumes:
       - mqtt-certs:/run/mqtt-certs:ro
     depends_on:

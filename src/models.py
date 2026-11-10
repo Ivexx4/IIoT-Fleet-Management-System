@@ -68,11 +68,6 @@ class HealthAlert(MessageModel):
     override_task: Literal["FORCE_CHARGE"] | None = None
 
 
-class UdpAck(MessageModel):
-    alert_id: str
-    status: Literal["accepted", "duplicate", "rejected"]
-
-
 class InfrastructureLocation(MessageModel):
     asset_type: Literal["shelf", "station"]
     asset_id: str = Field(min_length=1)

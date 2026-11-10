@@ -1,5 +1,3 @@
-import os
-import socket
 import threading
 import time
 from typing import Any
@@ -8,21 +6,17 @@ from uuid import uuid4
 import paho.mqtt.client as mqtt
 from pydantic import ValidationError
 
-from models import HealthAlert, RobotTelemetry, UdpAck
+from models import HealthAlert, RobotTelemetry
 from mqtt_config import (
     GROUP_ID,
     MQTT_BROKER,
     MQTT_PORT,
     MQTT_QOS,
-    UDP_HMAC_SECRET,
+    TOPIC_CRITICAL_ALERTS,
     create_mqtt_client,
 )
-from udp_auth import UdpAuthenticationError, UdpAuthenticator
 
-GATEWAY_IP = os.getenv("GATEWAY_IP", "127.0.0.1")
-GATEWAY_PORT = int(os.getenv("GATEWAY_PORT", "9090"))
 TOPIC_INTERNAL_AMR = f"{GROUP_ID}/internal/amr/+/status"
-TOPIC_ALERT_FALLBACK = f"{GROUP_ID}/internal/alerts/udp-fallback"
 BATTERY_THRESHOLD = 15.0
 STALL_TIMEOUT = 30.0
 ALERT_COOLDOWN = 10.0
@@ -37,14 +31,11 @@ class RobotHealth:
 
 class SystemMonitor:
     def __init__(self) -> None:
-        self.udp_auth = UdpAuthenticator(UDP_HMAC_SECRET)
         self.robots: dict[str, RobotHealth] = {}
         self.lock = threading.Lock()
         self.client = create_mqtt_client("system-monitor")
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
-        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp_sock.settimeout(0.5)
 
     def start(self) -> None:
         self.client.connect(MQTT_BROKER, MQTT_PORT, 60)
@@ -60,7 +51,6 @@ class SystemMonitor:
     def close(self) -> None:
         self.client.loop_stop()
         self.client.disconnect()
-        self.udp_sock.close()
 
     def on_connect(
         self,
@@ -132,44 +122,20 @@ class SystemMonitor:
                         current.last_alert = now
 
     def send_alert(self, alert: HealthAlert) -> bool:
-        payload = alert.model_dump_json().encode("utf-8")
-        for _ in range(3):
-            try:
-                self.udp_sock.sendto(
-                    self.udp_auth.seal(payload),
-                    (GATEWAY_IP, GATEWAY_PORT),
-                )
-                response, _ = self.udp_sock.recvfrom(1024)
-            except TimeoutError:
-                continue
-            except OSError as error:
-                print(f"UDP delivery failed for {alert.alert_id}: {error}")
-                break
-            try:
-                ack_payload = self.udp_auth.open(response)
-                ack = UdpAck.model_validate_json(ack_payload)
-            except (UdpAuthenticationError, ValidationError) as error:
-                print(f"Invalid UDP ACK for alert {alert.alert_id}: {error}")
-                continue
-            if ack.alert_id == alert.alert_id and ack.status in {
-                "accepted",
-                "duplicate",
-            }:
-                print(f"Gateway acknowledged alert {alert.alert_id}")
-                return True
-
-        print(f"No UDP ACK for {alert.alert_id}; publishing MQTT fallback")
         try:
             result = self.client.publish(
-                TOPIC_ALERT_FALLBACK,
-                payload,
+                TOPIC_CRITICAL_ALERTS,
+                alert.model_dump_json(),
                 qos=MQTT_QOS,
             )
             if result.rc != mqtt.MQTT_ERR_SUCCESS:
-                raise RuntimeError("MQTT rejected the critical alert fallback")
+                raise RuntimeError("MQTT rejected the critical alert")
             result.wait_for_publish(timeout=5)
+            if not result.is_published():
+                raise TimeoutError("MQTT broker did not acknowledge the critical alert")
+            print(f"MQTT broker acknowledged alert {alert.alert_id}")
             return True
-        except (OSError, RuntimeError) as error:
+        except (OSError, RuntimeError, TimeoutError) as error:
             print(f"Failed to deliver critical alert {alert.alert_id}: {error}")
             return False
 

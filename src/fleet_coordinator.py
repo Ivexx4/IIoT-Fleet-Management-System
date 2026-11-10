@@ -1,5 +1,4 @@
 import json
-import socket
 import threading
 import time
 from collections.abc import Sequence
@@ -24,7 +23,8 @@ from mqtt_config import (
     MQTT_PORT,
     MQTT_QOS,
     REDIS_URL,
-    UDP_HMAC_SECRET,
+    TOPIC_ORDER_ACK,
+    TOPIC_ORDER_SUBMIT,
     create_mqtt_client,
 )
 from task_allocator import (
@@ -35,10 +35,7 @@ from task_allocator import (
     plan_multi_agent_routes,
     route_cost,
 )
-from udp_auth import UdpAuthenticationError, UdpAuthenticator
 
-UDP_HOST = "0.0.0.0"
-UDP_PORT_ORDERS = 9091
 TOPIC_INTERNAL = f"{GROUP_ID}/internal/#"
 TOPIC_DISPATCH = f"{GROUP_ID}/internal/tasks/dispatch"
 TOPIC_LOCATION_REQUEST = f"{GROUP_ID}/internal/infrastructure/location/request"
@@ -96,18 +93,16 @@ class RedisState(Protocol):
 
 class FleetCoordinator:
     def __init__(self) -> None:
-        self.udp_auth = UdpAuthenticator(UDP_HMAC_SECRET)
-        self.redis: RedisState = cast(
-            RedisState,
-            Redis.from_url(REDIS_URL, decode_responses=True),
-        )
+        redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
+        self.redis: RedisState = cast(RedisState, redis_client)
         self.redis.ping()
-        self.client = create_mqtt_client("fleet-coordinator")
+        self.client = create_mqtt_client(
+            "fleet-coordinator",
+            persistent_session=True,
+            manual_ack=True,
+        )
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
-        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.udp_sock.bind((UDP_HOST, UDP_PORT_ORDERS))
         self.lock = threading.Lock()
         self.gateway_online = False
         self.last_discovery_request: dict[str, float] = {}
@@ -117,7 +112,6 @@ class FleetCoordinator:
     def start(self) -> None:
         self.client.connect(MQTT_BROKER, MQTT_PORT, 60)
         self.client.loop_start()
-        threading.Thread(target=self.run_udp_server, daemon=True).start()
         print(f"Fleet Coordinator started for {GROUP_ID}")
         try:
             while True:
@@ -128,7 +122,6 @@ class FleetCoordinator:
             self.close()
 
     def close(self) -> None:
-        self.udp_sock.close()
         self.client.loop_stop()
         self.client.disconnect()
         self.redis.close()
@@ -144,7 +137,12 @@ class FleetCoordinator:
         if reason_code.is_failure:
             print(f"MQTT connection failed: {reason_code}")
             return
-        client.subscribe(TOPIC_INTERNAL, qos=MQTT_QOS)
+        client.subscribe(
+            [
+                (TOPIC_INTERNAL, MQTT_QOS),
+                (TOPIC_ORDER_SUBMIT, MQTT_QOS),
+            ]
+        )
         print(f"Listening for fleet state on {TOPIC_INTERNAL}")
         self.request_infrastructure_locations()
 
@@ -297,6 +295,26 @@ class FleetCoordinator:
         userdata: Any,
         message: mqtt.MQTTMessage,
     ) -> None:
+        if message.topic == TOPIC_ORDER_SUBMIT:
+            try:
+                self.process_order_message(message.payload)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as error:
+                print(f"Rejected MQTT order: {error}")
+                client.ack(message.mid, message.qos)
+            except Exception as error:
+                print(f"Failed to process MQTT order: {error}")
+            else:
+                client.ack(message.mid, message.qos)
+            return
+        self.on_internal_message(client, userdata, message)
+        client.ack(message.mid, message.qos)
+
+    def on_internal_message(
+        self,
+        client: mqtt.Client,
+        userdata: Any,
+        message: mqtt.MQTTMessage,
+    ) -> None:
         try:
             topic_parts = message.topic.split("/")
             payload = json.loads(message.payload.decode("utf-8"))
@@ -387,46 +405,35 @@ class FleetCoordinator:
         except Exception as error:
             print(f"Failed to update coordinator state from MQTT: {error}")
 
-    def run_udp_server(self) -> None:
-        while True:
-            try:
-                datagram, address = self.udp_sock.recvfrom(4_096)
-            except OSError:
-                return
-            try:
-                payload = self.udp_auth.open(datagram)
-            except UdpAuthenticationError as error:
-                print(f"Rejected unauthenticated UDP order from {address}: {error}")
-                continue
-            try:
-                order = Order.model_validate_json(payload)
-                order_id = order.order_id or uuid4().hex
-                order_record = {
-                    **order.model_dump(exclude_none=True),
-                    "order_id": order_id,
-                }
-                self.redis.eval(
-                    ENQUEUE_ORDER_SCRIPT,
-                    2,
-                    REDIS_ORDER_IDS,
-                    REDIS_PENDING_ORDERS,
-                    order_id,
-                    json.dumps(order_record),
-                )
-                response = {"order_id": order_id, "status": "accepted"}
-                self.udp_sock.sendto(
-                    self.udp_auth.seal(json.dumps(response).encode("utf-8")),
-                    address,
-                )
-                print(f"Queued order {order_id}: {order.item} x{order.quantity}")
-            except (ValidationError, json.JSONDecodeError) as error:
-                print(f"Rejected UDP order from {address}: {error}")
-                self.udp_sock.sendto(
-                    b'{"status":"rejected"}',
-                    address,
-                )
-            except Exception as error:
-                print(f"Failed to enqueue UDP order from {address}: {error}")
+    def process_order_message(self, payload: bytes) -> None:
+        order = Order.model_validate_json(payload)
+        order_id = order.order_id or uuid4().hex
+        order_record = {
+            **order.model_dump(exclude_none=True),
+            "order_id": order_id,
+        }
+        enqueued = self.redis.eval(
+            ENQUEUE_ORDER_SCRIPT,
+            2,
+            REDIS_ORDER_IDS,
+            REDIS_PENDING_ORDERS,
+            order_id,
+            json.dumps(order_record),
+        )
+        response = {
+            "order_id": order_id,
+            "status": "accepted" if enqueued else "duplicate",
+        }
+        result = self.client.publish(
+            f"{TOPIC_ORDER_ACK}/{order_id}",
+            json.dumps(response),
+            qos=MQTT_QOS,
+        )
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            raise RuntimeError(
+                f"MQTT rejected the order acknowledgement for {order_id}"
+            )
+        print(f"Queued order {order_id}: {order.item} x{order.quantity}")
 
     def process_logic(self) -> None:
         if not self.gateway_online:

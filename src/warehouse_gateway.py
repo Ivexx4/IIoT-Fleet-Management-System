@@ -1,5 +1,4 @@
 import json
-import socket
 import threading
 import time
 from datetime import datetime
@@ -8,6 +7,7 @@ from typing import Any
 import paho.mqtt.client as mqtt
 from influxdb_client import InfluxDBClient, Point, WriteOptions
 from pydantic import ValidationError
+from redis import Redis
 
 from models import (
     DispatchCommand,
@@ -25,27 +25,27 @@ from mqtt_config import (
     MQTT_BROKER,
     MQTT_PORT,
     MQTT_QOS,
-    UDP_HMAC_SECRET,
+    REDIS_URL,
+    TOPIC_CRITICAL_ALERTS,
     create_mqtt_client,
 )
 from protocol import encode_command, normalize_stock
-from udp_auth import UdpAuthenticationError, UdpAuthenticator
 
-UDP_HOST = "0.0.0.0"
-UDP_PORT = 9090
 TOPIC_SENSORS = f"warehouse/{GROUP_ID}/#"
 TOPIC_TASK_DISPATCH = f"{GROUP_ID}/internal/tasks/dispatch"
-TOPIC_ALERT_FALLBACK = f"{GROUP_ID}/internal/alerts/udp-fallback"
 TOPIC_GATEWAY_AVAILABILITY = f"{GROUP_ID}/internal/gateway/availability"
+REDIS_PROCESSED_ALERTS = "warehouse:processed-alerts"
 
 
 class WarehouseGateway:
     def __init__(self) -> None:
         if not INFLUX_TOKEN:
             raise RuntimeError("INFLUX_TOKEN is required to start the gateway")
-        self.udp_auth = UdpAuthenticator(UDP_HMAC_SECRET)
-
-        self.mqtt_client = create_mqtt_client("warehouse-gateway")
+        self.mqtt_client = create_mqtt_client(
+            "warehouse-gateway",
+            persistent_session=True,
+            manual_ack=True,
+        )
         self.mqtt_client.on_connect = self.on_connect
         self.mqtt_client.on_message = self.on_message
         self.mqtt_client.will_set(
@@ -71,15 +71,13 @@ class WarehouseGateway:
                 exponential_base=2,
             )
         )
-        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.udp_sock.bind((UDP_HOST, UDP_PORT))
-        self.processed_alert_ids: set[str] = set()
+        self.redis = Redis.from_url(REDIS_URL, decode_responses=True)
+        self.redis.ping()
+        self.alert_lock = threading.Lock()
 
     def start(self) -> None:
         self.mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
         self.mqtt_client.loop_start()
-        threading.Thread(target=self.run_udp_server, daemon=True).start()
         print(f"Gateway ready for group {GROUP_ID}")
         try:
             while True:
@@ -88,7 +86,6 @@ class WarehouseGateway:
             self.close()
 
     def close(self) -> None:
-        self.udp_sock.close()
         self.mqtt_client.publish(
             TOPIC_GATEWAY_AVAILABILITY,
             json.dumps({"status": "offline"}),
@@ -99,6 +96,7 @@ class WarehouseGateway:
         self.mqtt_client.disconnect()
         self.write_api.close()
         self.influx_client.close()
+        self.redis.close()
 
     def on_connect(
         self,
@@ -115,7 +113,7 @@ class WarehouseGateway:
             [
                 (TOPIC_SENSORS, MQTT_QOS),
                 (TOPIC_TASK_DISPATCH, MQTT_QOS),
-                (TOPIC_ALERT_FALLBACK, MQTT_QOS),
+                (TOPIC_CRITICAL_ALERTS, MQTT_QOS),
             ]
         )
         client.publish(
@@ -132,13 +130,16 @@ class WarehouseGateway:
         userdata: Any,
         message: mqtt.MQTTMessage,
     ) -> None:
+        if message.topic in {TOPIC_TASK_DISPATCH, TOPIC_CRITICAL_ALERTS}:
+            threading.Thread(
+                target=self.process_control_message,
+                args=(client, message),
+                daemon=True,
+            ).start()
+            return
         try:
             payload = message.payload.decode("utf-8")
-            if message.topic == TOPIC_TASK_DISPATCH:
-                self.process_command(DispatchCommand.model_validate_json(payload))
-            elif message.topic == TOPIC_ALERT_FALLBACK:
-                self.process_alert(HealthAlert.model_validate_json(payload))
-            elif message.topic.startswith(f"warehouse/{GROUP_ID}/"):
+            if message.topic.startswith(f"warehouse/{GROUP_ID}/"):
                 self.process_sensor_data(message.topic, payload)
         except (
             UnicodeDecodeError,
@@ -147,8 +148,34 @@ class WarehouseGateway:
             ValueError,
         ) as error:
             print(f"Rejected MQTT message on {message.topic}: {error}")
+            client.ack(message.mid, message.qos)
         except Exception as error:
             print(f"Failed to process MQTT message on {message.topic}: {error}")
+            if message.topic != TOPIC_CRITICAL_ALERTS:
+                client.ack(message.mid, message.qos)
+            return
+        else:
+            client.ack(message.mid, message.qos)
+
+    def process_control_message(
+        self,
+        client: mqtt.Client,
+        message: mqtt.MQTTMessage,
+    ) -> None:
+        try:
+            if message.topic == TOPIC_TASK_DISPATCH:
+                self.process_command(
+                    DispatchCommand.model_validate_json(message.payload)
+                )
+            elif message.topic == TOPIC_CRITICAL_ALERTS:
+                self.process_alert(HealthAlert.model_validate_json(message.payload))
+        except (ValidationError, ValueError, json.JSONDecodeError) as error:
+            print(f"Rejected MQTT control message on {message.topic}: {error}")
+            client.ack(message.mid, message.qos)
+        except Exception as error:
+            print(f"Failed to process MQTT control message on {message.topic}: {error}")
+        else:
+            client.ack(message.mid, message.qos)
 
     def process_sensor_data(self, topic: str, payload: str) -> None:
         data = json.loads(payload)
@@ -244,54 +271,26 @@ class WarehouseGateway:
         print(f"Dispatched {command.command} to {command.robot_id}")
 
     def process_alert(self, alert: HealthAlert) -> str:
-        if alert.alert_id in self.processed_alert_ids:
-            return "duplicate"
-        point = (
-            Point("system_alerts")
-            .tag("alert_id", alert.alert_id)
-            .tag("robot_id", alert.robot_id)
-            .field("level", alert.level)
-            .field("message", alert.message)
-        )
-        self.write_api.write(bucket=INFLUX_BUCKET, record=point)
-        if alert.override_task:
-            self.process_command(
-                DispatchCommand(
-                    robot_id=alert.robot_id,
-                    command=alert.override_task,
+        with self.alert_lock:
+            if self.redis.sismember(REDIS_PROCESSED_ALERTS, alert.alert_id):
+                return "duplicate"
+            point = (
+                Point("system_alerts")
+                .tag("alert_id", alert.alert_id)
+                .tag("robot_id", alert.robot_id)
+                .field("level", alert.level)
+                .field("message", alert.message)
+            )
+            self.write_api.write(bucket=INFLUX_BUCKET, record=point)
+            if alert.override_task:
+                self.process_command(
+                    DispatchCommand(
+                        robot_id=alert.robot_id,
+                        command=alert.override_task,
+                    )
                 )
-            )
-        self.processed_alert_ids.add(alert.alert_id)
-        return "accepted"
-
-    def run_udp_server(self) -> None:
-        while True:
-            try:
-                datagram, address = self.udp_sock.recvfrom(4_096)
-            except OSError:
-                return
-            try:
-                payload = self.udp_auth.open(datagram)
-            except UdpAuthenticationError as error:
-                print(f"Rejected unauthenticated UDP alert from {address}: {error}")
-                continue
-            alert_id = ""
-            try:
-                alert = HealthAlert.model_validate_json(payload)
-                alert_id = alert.alert_id
-                status = self.process_alert(alert)
-            except (ValidationError, ValueError, json.JSONDecodeError) as error:
-                status = "rejected"
-                print(f"Rejected UDP alert from {address}: {error}")
-            except Exception as error:
-                print(f"Failed to process UDP alert from {address}: {error}")
-                continue
-            self.udp_sock.sendto(
-                self.udp_auth.seal(
-                    json.dumps({"alert_id": alert_id, "status": status}).encode("utf-8")
-                ),
-                address,
-            )
+            self.redis.sadd(REDIS_PROCESSED_ALERTS, alert.alert_id)
+            return "accepted"
 
 
 if __name__ == "__main__":

@@ -4,13 +4,13 @@
 
 Este projeto implementa uma solução completa de **IoT Industrial (IIoT)** para um armazém autónomo simulado. O sistema integra uma frota de **Robôs Móveis Autónomos (AMRs)** e sensores (Prateleiras e Estações) numa arquitetura orientada a eventos.
 
-[cite_start]O foco principal é a gestão de múltiplas fontes de I/O e a garantia de transferência de dados fiável via **MQTT** para telemetria, utilizando **UDP** para sinalização crítica de baixa latência (alertas e *overrides*)[cite: 7, 8, 9].
+O foco principal é a gestão de múltiplas fontes de I/O e a transferência fiável de eventos via **MQTT**, incluindo telemetria, encomendas e alertas críticos.
 
 ---
 
 ## 🏗️ Arquitetura do Sistema
 
-A arquitetura desacopla a camada operacional "crua" (simulação física) da lógica de gestão de alto nível. [cite_start]Um **Broker MQTT Mosquitto** atua como a espinha dorsal da comunicação, enquanto sockets UDP diretos lidam com sinais críticos[cite: 14, 18].
+A arquitetura desacopla a camada operacional "crua" (simulação física) da lógica de gestão de alto nível. Um **Broker MQTT Mosquitto com TLS** atua como event bus para toda a comunicação orientada a eventos.
 
 ### Diagrama de Componentes
 O sistema é composto pelos seguintes módulos principais:
@@ -27,7 +27,7 @@ flowchart LR
     Influx[(InfluxDB)]
     Grafana[Grafana dashboard]
     Visualizer[Live warehouse map]
-    Client[Order client UDP]
+    Client[Order client]
 
     AMRs -->|Telemetry and commands| Broker
     Infra -->|Telemetry| Broker
@@ -43,21 +43,24 @@ flowchart LR
     Broker -->|Location reports| Coordinator
     Infra -->|Location reports| Broker
     Coordinator <--> Redis
+    Gateway <--> Redis
     Gateway -->|Metrics| Influx
     Influx --> Grafana
     Broker -->|AMR and asset telemetry| Visualizer
-    Client -->|Orders UDP 9091| Coordinator
-    Monitor -->|Critical alerts UDP 9090| Gateway
+    Client -->|Order submit and acknowledgement| Broker
+    Monitor -->|Critical alerts| Broker
+    Broker -->|Orders| Coordinator
+    Broker -->|Critical alerts| Gateway
 ```
 
-| Componente | Script Python | Função Principal descrita no Relatório |
-| :--- | :--- | :--- |
-| **Warehouse Gateway** | `src/warehouse_gateway.py` | **Ponte Central e Tradutor**. Normaliza telemetria, traduz protocolos e armazena métricas no InfluxDB. Aloja o servidor de alertas UDP. |
-| **Fleet Coordinator** | `src/fleet_coordinator.py` | Mantém o estado de robôs, prateleiras e estações no Redis, descobre localizações, atribui tarefas pelo algoritmo Hungarian e planeia rotas conjuntas com CBS. |
-| **System Monitor** | `src/system_monitor.py` | Analisa telemetria para detetar anomalias e envia alertas com confirmação UDP e fallback MQTT. |
-| **AMR Simulator** | `src/amr_robot.py` | Simula a máquina de estados, bateria, Last Will e falhas estocásticas. |
-| **Smart Infrastructure** | `src/shelves.py`, `src/loading_station.py` | Simula prateleiras e estações de embalamento. |
-| **Live map** | `src/visualizer.py`, `src/web/index.html` | Serve uma planta SVG e recebe telemetria MQTT em direto. |
+| Componente               | Script Python                              | Função Principal descrita no Relatório                                                                                                                        |
+|:-------------------------|:-------------------------------------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Warehouse Gateway**    | `src/warehouse_gateway.py`                 | **Ponte Central e Tradutor**. Normaliza telemetria, traduz protocolos e armazena métricas no InfluxDB; consome alertas críticos MQTT.                         |
+| **Fleet Coordinator**    | `src/fleet_coordinator.py`                 | Mantém o estado de robôs, prateleiras e estações no Redis, descobre localizações, atribui tarefas pelo algoritmo Hungarian e planeia rotas conjuntas com CBS. |
+| **System Monitor**       | `src/system_monitor.py`                    | Analisa telemetria para detetar anomalias e publica alertas críticos por MQTT QoS 1.                                                                           |
+| **AMR Simulator**        | `src/amr_robot.py`                         | Simula a máquina de estados, bateria, Last Will e falhas estocásticas.                                                                                        |
+| **Smart Infrastructure** | `src/shelves.py`, `src/loading_station.py` | Simula prateleiras e estações de embalamento.                                                                                                                 |
+| **Live map**             | `src/visualizer.py`, `src/web/index.html`  | Serve uma planta SVG e recebe telemetria MQTT em direto.                                                                                                      |
 
 ---
 
@@ -66,19 +69,21 @@ flowchart LR
 ### 1. Protocolo de Controlo Binário (Gateway $\to$ AMR)
 Para otimizar a largura de banda e garantir processamento determinístico, os comandos de controlo não usam JSON. O Gateway serializa os comandos num **payload binário fixo de 4 bytes** usando a biblioteca `struct` (`format 'BBBB'`).
 
-| Byte | Função | Exemplo / Descrição |
-| :--- | :--- | :--- |
-| **Byte 0** | `Command Type` | [cite_start]Identifica a ação (e.g., `0x01` executa tarefa, `0x03` força carga)[cite: 35]. |
-| **Byte 1** | `Target Shelf` | [cite_start]ID numérico da prateleira de destino[cite: 36]. |
-| **Byte 2** | `Target Station` | [cite_start]ID numérico da estação de embalamento[cite: 37]. |
-| **Byte 3** | `Quantity` | Quantidade a recolher; usa `0` no comando de carga forçada. |
+| Byte       | Função           | Exemplo / Descrição                                                  |
+|:-----------|:-----------------|:---------------------------------------------------------------------|
+| **Byte 0** | `Command Type`   | Identifica a ação (e.g., `0x01` executa tarefa, `0x03` força carga). |
+| **Byte 1** | `Target Shelf`   | ID numérico da prateleira de destino.                                |
+| **Byte 2** | `Target Station` | ID numérico da estação de embalamento.                               |
+| **Byte 3** | `Quantity`       | Quantidade a recolher; usa `0` no comando de carga forçada.          |
 
 ### 2. Estrutura de Tópicos MQTT (REST-like)
-[cite_start]A hierarquia reforça a separação de responsabilidades[cite: 23]:
+A hierarquia reforça a separação de responsabilidades:
 * **Telemetria:** `warehouse/{GroupID}/{Resource}/{ID}/{Attribute}` (ex: `.../amr/RBT1/status`)
-* [cite_start]**Wildcards:** O Monitor e o Debugger subscrevem `warehouse/{GroupID}/#` para ingerir o fluxo completo de dados[cite: 24].
+* **Wildcards:** O Monitor e o Debugger subscrevem `warehouse/{GroupID}/#` para ingerir o fluxo completo de dados.
 * **Pedido de localização:** `{GroupID}/internal/infrastructure/location/request`. O Coordinator publica um `request_id`; prateleiras e estações subscrevem o canal partilhado.
 * **Resposta de localização:** `{GroupID}/internal/infrastructure/location`. Cada resposta identifica `asset_type`, `asset_id`, `location_id`, `x`, `y` e, para prateleiras, `zone_id`.
+* **Submissão de encomendas:** `{GroupID}/v1/orders/submit`, QoS 1; o Coordinator publica a confirmação da aplicação em `{GroupID}/v1/orders/ack/{order_id}` após enfileirar a encomenda no Redis.
+* **Alertas críticos:** `{GroupID}/v1/alerts/critical`, QoS 1; o Gateway processa e deduplica alertas através do `alert_id`.
 
 ### 3. Descoberta e gestão de infraestrutura
 
@@ -87,7 +92,7 @@ Ao ligar-se ao MQTT, o Coordinator solicita as localizações conhecidas; repete
 `FleetCoordinator.add_shelf()` / `remove_shelf()` e `add_station()` / `remove_station()` mantêm os catálogos no Redis (`warehouse:shelves` e `warehouse:stations`). A remoção apaga o registo ativo e grava uma marca de removido para impedir que a descoberta ou telemetria volte a adicioná-lo. Uma chamada explícita a `add_*` reativa o ativo. Estes são métodos internos Python: não existe atualmente uma API ou interface de utilizador para gestão remota.
 
 ### 4. Normalização de Dados (Data Pipeline)
-[cite_start]O Gateway atua como um adaptador semântico para padronizar métricas de diferentes zonas do armazém antes da ingestão no InfluxDB[cite: 43]:
+O Gateway atua como um adaptador semântico para padronizar métricas de diferentes zonas do armazém antes da ingestão no InfluxDB:
 * **Input:** Storage-A reporta "unidades", Storage-B reporta "kilogramas".
 * **Processo:** Aplicação da função em tempo real: `stock_units = raw_kg / 23`; o consumo da prateleira segue a quantidade da encomenda.
 * **Output:** Métricas consistentes para o Dashboard e Coordenador.
@@ -109,9 +114,9 @@ O mapa de demonstração e as coordenadas lógicas estão definidos em `src/task
 O Fleet Coordinator calcula, com Conflict-Based Search (CBS), rotas em espaço-tempo para os robôs atribuídos no mesmo lote. O plano inclui as deslocações à prateleira e à estação, com uma janela conservadora para a operação de recolha; o AMR executa os passos temporizados recebidos por MQTT. Como os tempos da simulação e a entrega de mensagens podem divergir do modelo discreto, a verificação distribuída de célula ocupada continua ativa como proteção e pode ainda produzir `STALLED_TRAFFIC`. O planeador limita-se à grelha de demonstração e aos robôs incluídos no lote, pelo que não é uma garantia de segurança física nem elimina esperas em situações fora do modelo.
 
 ### Deteção de Anomalias (System Monitor)
-O Monitor analisa a telemetria e aciona o Gateway via UDP (Porta 9090) com um comando `FORCE_CHARGE` se:
+O Monitor analisa a telemetria e publica um alerta crítico MQTT com o comando `FORCE_CHARGE` se:
 * **Falha mecânica:** O robô permanece no estado `STALLED` por **30 segundos**, sem mudança da localização lógica.
-* [cite_start]**Critical Battery:** A bateria cai abaixo de **15%** sem o robô estar a carregar[cite: 76].
+* **Critical Battery:** A bateria cai abaixo de **15%** sem o robô estar a carregar.
 
 ---
 
@@ -126,7 +131,7 @@ O dashboard provisionado, **Warehouse Overview**, inclui:
 * **Station Throughput:** ocupação das estações de embalamento.
 * **Task History** e **System Alerts:** tarefas despachadas e alertas de saúde.
 
-O **Warehouse Control Center** fica disponível em `http://<HOST_IP>:8080` e centraliza a planta SVG/frota em direto e o dashboard Grafana incorporado. O mapa atualiza a cada 300 ms e as métricas a cada 10 segundos. O visualizador subscreve MQTT no servidor, sem expor credenciais ao browser. O host/IP é definido por `HOST_IP` no `.env` (predefinição `127.0.0.1`); as portas externas de MQTT TLS (8883), InfluxDB (8086), Grafana (3000), visualizador (8080) e encomendas UDP (9091) são ligadas a esse endereço. Os containers comunicam entre si pela rede Docker e pelos nomes dos serviços.
+O **Warehouse Control Center** fica disponível em `http://<HOST_IP>:8080` e centraliza a planta SVG/frota em direto e o dashboard Grafana incorporado. O mapa atualiza a cada 300 ms e as métricas a cada 10 segundos. O visualizador subscreve MQTT no servidor, sem expor credenciais ao browser. O host/IP é definido por `HOST_IP` no `.env` (predefinição `127.0.0.1`); as portas externas de MQTT TLS (8883), InfluxDB (8086), Grafana (3000) e visualizador (8080) são ligadas a esse endereço. Os containers comunicam entre si pela rede Docker e pelos nomes dos serviços.
 
 Para disponibilizar os serviços numa interface LAN, define `HOST_IP` com o endereço IPv4 dessa interface no `.env` antes de iniciar a stack. O certificado MQTT é regenerado automaticamente com esse IP como SAN e conserva a mesma CA. Redis permanece privado na rede Docker. O Grafana tem acesso anónimo de leitura para permitir a incorporação no painel único; não exponhas o host numa rede não confiável sem restringir o acesso por firewall e rever as credenciais.
 
@@ -144,7 +149,7 @@ docker compose up --build --scale amr=4 -d
 docker compose ps
 ```
 
-No PowerShell, copie a configuração com `Copy-Item .env.example .env` e ajuste `HOST_IP` no `.env` para o endereço IPv4 da máquina/interface pretendida (mantém `127.0.0.1` para acesso apenas local). Os valores do `.env.example` são apenas para uma demonstração local; altere todas as palavras-passe e tokens antes de expor serviços ou usar fora da máquina local. Gere também uma chave forte para `UDP_HMAC_SECRET` (por exemplo, `python -c "import secrets; print(secrets.token_hex(32))"`) e coloque-a no `.env`; a mesma chave tem de estar disponível para o Gateway, Coordinator, System Monitor e cliente de encomendas. O ficheiro `.env` está ignorado pelo Git.
+No PowerShell, copie a configuração com `Copy-Item .env.example .env` e ajuste `HOST_IP` no `.env` para o endereço IPv4 da máquina/interface pretendida (mantém `127.0.0.1` para acesso apenas local). Os valores do `.env.example` são apenas para uma demonstração local; altere todas as palavras-passe e tokens antes de expor serviços ou usar fora da máquina local. O ficheiro `.env` está ignorado pelo Git.
 
 Um único comando inicia Mosquitto com TLS e autenticação, InfluxDB, Redis, Grafana, Gateway, Coordinator, System Monitor, simuladores de prateleiras/estações e quatro AMRs. Para alterar a dimensão da frota, mude `--scale amr=4`.
 
@@ -162,9 +167,9 @@ Consulte **Descoberta e gestão de infraestrutura** para os tópicos, intervalos
 * Grafana para administração: `http://${HOST_IP}:3000` (credenciais iniciais no `.env`).
 * InfluxDB API/UI: `http://${HOST_IP}:8086`.
 * Broker MQTT TLS: `${HOST_IP}:8883`; a CA local fica guardada num volume Docker.
-* As encomendas UDP do host são enviadas para `${HOST_IP}:9091`:
+* Para submeter uma encomenda através do broker MQTT TLS:
   ```bash
-  python src/client_order_injector.py --item item_A --qty 5 --station P1
+  docker compose exec coordinator python src/client_order_injector.py --item item_A --qty 5 --station P1
   ```
 * `docker compose down` pára a stack e mantém os dados. `docker compose down -v` também apaga os dados persistidos.
 
@@ -172,7 +177,7 @@ Consulte **Descoberta e gestão de infraestrutura** para os tópicos, intervalos
 
 O Coordinator persiste estado de robôs, prateleiras, estações, reservas, encomendas pendentes e ativos removidos no Redis com AOF. O alocador usa o algoritmo Hungarian para minimizar globalmente o tempo de rota estimado; CBS planeia em conjunto as rotas do lote, sobre a grelha de demonstração definida em `src/task_allocator.py`, não um mapa físico do armazém.
 
-As mensagens de entrada são validadas com modelos Pydantic. Telemetria e comandos MQTT usam QoS 1; os AMRs publicam Last Will and Testament para sinalizar desconexões. As posições contínuas dos AMRs são campos `x` e `y` da medição `Robots_status` no InfluxDB. Ordens UDP (porta 9091) e alertas UDP/ACK (porta 9090) usam HMAC-SHA256 com `UDP_HMAC_SECRET`, timestamps e nonces; mensagens inválidas, com mais de 30 segundos ou repetidas durante a execução são rejeitadas. A cache anti-replay é em memória e perde-se ao reiniciar o serviço. Alertas críticos continuam a usar repetição e fallback MQTT caso não recebam confirmação. A chave de demonstração incluída no `.env.example` é pública e não serve para proteger uma instalação exposta.
+As mensagens são validadas com modelos Pydantic. Telemetria, comandos, encomendas e alertas críticos usam MQTT QoS 1 através do broker TLS autenticado; as mensagens de encomenda e alerta têm tópicos dedicados e consumidores com sessões persistentes e ACK manual após processamento. A submissão de encomendas espera também pela confirmação de aplicação do Coordinator, emitida depois da gravação idempotente no Redis. O `alert_id` é guardado no Redis pelo Gateway para deduplicar entregas repetidas, incluindo após reinício. O broker tem persistência ativada; QoS 1 oferece entrega *at least once*, pelo que os consumidores críticos mantêm idempotência. As posições contínuas dos AMRs são os campos `x` e `y` da medição `Robots_status` no InfluxDB. Os fluxos de encomendas e alertas já não usam sockets UDP nem segredos HMAC de aplicação.
 
 ### Desenvolvimento e validação
 
