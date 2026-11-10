@@ -1,0 +1,6 @@
+user order-client
+topic write +/v1/orders/submit
+topic read +/v1/orders/ack/+
+
+user manual-command
+topic write warehouse/+/amr/+/command

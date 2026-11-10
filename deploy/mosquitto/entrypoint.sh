@@ -3,7 +3,15 @@ set -eu
 
 : "${MQTT_USERNAME:?MQTT_USERNAME is required}"
 : "${MQTT_PASSWORD:?MQTT_PASSWORD is required}"
+: "${MQTT_ORDER_PASSWORD:?MQTT_ORDER_PASSWORD is required}"
+: "${MQTT_COMMAND_PASSWORD:?MQTT_COMMAND_PASSWORD is required}"
 : "${HOST_IP:=127.0.0.1}"
+case "$MQTT_USERNAME" in
+    *[!A-Za-z0-9._-]*|'')
+        echo "MQTT_USERNAME may only contain letters, numbers, dots, underscores, and hyphens" >&2
+        exit 1
+        ;;
+esac
 mkdir -p /mosquitto/data /mosquitto/certs
 
 if [ ! -s /mosquitto/data/ca.crt ] || [ ! -s /mosquitto/data/ca.key ]; then
@@ -38,5 +46,11 @@ fi
 
 cp /mosquitto/data/ca.crt /mosquitto/certs/ca.crt
 mosquitto_passwd -b -c /mosquitto/data/passwordfile "$MQTT_USERNAME" "$MQTT_PASSWORD"
+mosquitto_passwd -b /mosquitto/data/passwordfile order-client "$MQTT_ORDER_PASSWORD"
+mosquitto_passwd -b /mosquitto/data/passwordfile manual-command "$MQTT_COMMAND_PASSWORD"
+{
+    printf 'user %s\ntopic readwrite #\n\n' "$MQTT_USERNAME"
+    cat /mosquitto/config/aclfile
+} > /mosquitto/data/aclfile
 chown -R mosquitto:mosquitto /mosquitto/data /mosquitto/certs
 exec su-exec mosquitto mosquitto -c /mosquitto/config/mosquitto.conf

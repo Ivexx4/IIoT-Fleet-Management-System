@@ -2,6 +2,7 @@ import pytest
 
 from amr_robot import PEER_STATE_TIMEOUT, AMRRobot
 from models import RobotTelemetry
+from mqtt_load_test import LoadTest, _latency_summary
 from task_allocator import plan_multi_agent_routes
 
 
@@ -92,3 +93,42 @@ def test_traffic_reservations_follow_priority_and_two_second_peer_timeout(
 
 def test_peer_timeout_is_two_seconds() -> None:
     assert PEER_STATE_TIMEOUT == 2.0
+
+
+def test_load_test_latency_summary_reports_nearest_rank_percentiles() -> None:
+    assert _latency_summary([8, 2, 4, 6]) == {
+        "samples": 4,
+        "p50": 4,
+        "p95": 8,
+        "p99": 8,
+        "max": 8,
+    }
+
+
+def test_load_test_latency_summary_handles_no_messages() -> None:
+    assert _latency_summary([]) == {
+        "samples": 0,
+        "p50": None,
+        "p95": None,
+        "p99": None,
+        "max": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("amr_count", "messages_per_amr", "interval_ms", "timeout"),
+    [
+        (0, 1, 0, 1),
+        (1, 0, 0, 1),
+        (1, 1, -1, 1),
+        (1, 1, 0, 0),
+    ],
+)
+def test_load_test_rejects_invalid_parameters(
+    amr_count: int,
+    messages_per_amr: int,
+    interval_ms: int,
+    timeout: float,
+) -> None:
+    with pytest.raises(ValueError):
+        LoadTest(amr_count, messages_per_amr, interval_ms, timeout)

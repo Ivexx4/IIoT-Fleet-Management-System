@@ -37,7 +37,10 @@ def send_order(
     subscribed = threading.Event()
     acknowledged = threading.Event()
     response: dict[str, str] = {}
-    client = create_mqtt_client(f"order-client-{uuid4().hex}")
+    client = create_mqtt_client(
+        f"order-client-{uuid4().hex}",
+        credential_role="order",
+    )
     ack_topic = f"{TOPIC_ORDER_ACK}/{order.order_id}"
 
     def on_connect(

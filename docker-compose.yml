@@ -20,6 +20,8 @@ services:
     environment:
       MQTT_USERNAME: ${MQTT_USERNAME:-warehouse}
       MQTT_PASSWORD: ${MQTT_PASSWORD:-warehouse-dev-only}
+      MQTT_ORDER_PASSWORD: ${MQTT_ORDER_PASSWORD:-order-dev-only}
+      MQTT_COMMAND_PASSWORD: ${MQTT_COMMAND_PASSWORD:-command-dev-only}
       HOST_IP: ${HOST_IP:-127.0.0.1}
     ports:
       - "${HOST_IP:-127.0.0.1}:8883:8883"
@@ -97,6 +99,57 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+
+  mqtt-load-test:
+    build: .
+    command: ["python", "src/mqtt_load_test.py"]
+    profiles: ["performance"]
+    environment: *app-environment
+    volumes:
+      - mqtt-certs:/run/mqtt-certs:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      gateway:
+        condition: service_started
+      coordinator:
+        condition: service_started
+
+  client-order-injector:
+    build: .
+    command: ["python", "src/client_order_injector.py"]
+    profiles: ["tools"]
+    environment:
+      WAREHOUSE_GROUP_ID: ${WAREHOUSE_GROUP_ID:-demo}
+      MQTT_BROKER: mosquitto
+      MQTT_PORT: "8883"
+      MQTT_ORDER_USERNAME: order-client
+      MQTT_ORDER_PASSWORD: ${MQTT_ORDER_PASSWORD:-order-dev-only}
+      MQTT_TLS_CA_CERT: /run/mqtt-certs/ca.crt
+    volumes:
+      - mqtt-certs:/run/mqtt-certs:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+
+  manual-command-sender:
+    build: .
+    command: ["python", "src/manual_command_sender.py"]
+    profiles: ["tools"]
+    environment:
+      WAREHOUSE_GROUP_ID: ${WAREHOUSE_GROUP_ID:-demo}
+      MQTT_BROKER: mosquitto
+      MQTT_PORT: "8883"
+      MQTT_COMMAND_USERNAME: manual-command
+      MQTT_COMMAND_PASSWORD: ${MQTT_COMMAND_PASSWORD:-command-dev-only}
+      MQTT_TLS_CA_CERT: /run/mqtt-certs/ca.crt
+    volumes:
+      - mqtt-certs:/run/mqtt-certs:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
 
   system-monitor:
     build: .

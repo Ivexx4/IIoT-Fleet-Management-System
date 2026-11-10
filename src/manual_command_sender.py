@@ -6,7 +6,10 @@ from protocol import encode_command
 
 def send_command(robot_id: str, command: str, shelf_id: str, station_id: str) -> None:
     topic = f"warehouse/{GROUP_ID}/amr/{robot_id}/command"
-    client = create_mqtt_client("manual-command-sender")
+    client = create_mqtt_client(
+        "manual-command-sender",
+        credential_role="command",
+    )
     client.connect(MQTT_BROKER, MQTT_PORT, 60)
     client.loop_start()
     try:
@@ -18,6 +21,8 @@ def send_command(robot_id: str, command: str, shelf_id: str, station_id: str) ->
         if info.rc != 0:
             raise RuntimeError(f"MQTT rejected the command for {robot_id}")
         info.wait_for_publish(timeout=5)
+        if not info.is_published():
+            raise TimeoutError(f"Broker did not acknowledge the command for {robot_id}")
     finally:
         client.loop_stop()
         client.disconnect()

@@ -1,5 +1,6 @@
 import os
 import ssl
+from typing import Literal
 
 import paho.mqtt.client as mqtt
 from dotenv import load_dotenv
@@ -12,6 +13,10 @@ MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 MQTT_USERNAME = os.getenv("MQTT_USERNAME")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
 MQTT_TLS_CA_CERT = os.getenv("MQTT_TLS_CA_CERT")
+MQTT_ORDER_USERNAME = os.getenv("MQTT_ORDER_USERNAME", "order-client")
+MQTT_ORDER_PASSWORD = os.getenv("MQTT_ORDER_PASSWORD")
+MQTT_COMMAND_USERNAME = os.getenv("MQTT_COMMAND_USERNAME", "manual-command")
+MQTT_COMMAND_PASSWORD = os.getenv("MQTT_COMMAND_PASSWORD")
 MQTT_QOS = 1
 TOPIC_ORDER_SUBMIT = f"{GROUP_ID}/v1/orders/submit"
 TOPIC_ORDER_ACK = f"{GROUP_ID}/v1/orders/ack"
@@ -29,6 +34,7 @@ def create_mqtt_client(
     *,
     persistent_session: bool = False,
     manual_ack: bool = False,
+    credential_role: Literal["order", "command"] | None = None,
 ) -> mqtt.Client:
     client = mqtt.Client(
         callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
@@ -36,8 +42,18 @@ def create_mqtt_client(
         clean_session=not persistent_session,
         manual_ack=manual_ack,
     )
-    if MQTT_USERNAME:
-        client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+    username: str | None
+    password: str | None
+    if credential_role == "order":
+        username, password = MQTT_ORDER_USERNAME, MQTT_ORDER_PASSWORD
+    elif credential_role == "command":
+        username, password = MQTT_COMMAND_USERNAME, MQTT_COMMAND_PASSWORD
+    else:
+        username, password = MQTT_USERNAME, MQTT_PASSWORD
+    if credential_role is not None and (not username or not password):
+        raise RuntimeError(f"MQTT {credential_role} credentials are required")
+    if username:
+        client.username_pw_set(username, password)
     if MQTT_TLS_CA_CERT:
         client.tls_set(
             ca_certs=MQTT_TLS_CA_CERT,

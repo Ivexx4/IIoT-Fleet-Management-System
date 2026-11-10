@@ -4,9 +4,11 @@ from types import SimpleNamespace
 from typing import cast
 
 import paho.mqtt.client as mqtt
+import pytest
 from influxdb_client.client.write_api import WriteApi
 from redis import Redis
 
+import mqtt_config
 from fleet_coordinator import FleetCoordinator, RedisState
 from models import HealthAlert
 from mqtt_config import (
@@ -183,3 +185,39 @@ def test_critical_consumer_client_uses_persistent_manual_ack() -> None:
 
     assert client._clean_session is False
     assert client._manual_ack is True
+
+
+@pytest.mark.parametrize("role", ["order", "command"])
+def test_injection_roles_require_dedicated_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+) -> None:
+    monkeypatch.setattr(mqtt_config, "MQTT_PASSWORD", "shared-service-password")
+    monkeypatch.setattr(mqtt_config, f"MQTT_{role.upper()}_PASSWORD", None)
+
+    with pytest.raises(RuntimeError, match=f"MQTT {role} credentials are required"):
+        create_mqtt_client("injection-test", credential_role=role)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("role", "username", "password"),
+    [
+        ("order", "order-client", "order-secret"),
+        ("command", "manual-command", "command-secret"),
+    ],
+)
+def test_injection_roles_use_separate_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+    username: str,
+    password: str,
+) -> None:
+    monkeypatch.setattr(mqtt_config, "MQTT_USERNAME", "shared-service")
+    monkeypatch.setattr(mqtt_config, "MQTT_PASSWORD", "shared-service-password")
+    monkeypatch.setattr(mqtt_config, f"MQTT_{role.upper()}_USERNAME", username)
+    monkeypatch.setattr(mqtt_config, f"MQTT_{role.upper()}_PASSWORD", password)
+
+    client = create_mqtt_client("injection-test", credential_role=role)  # type: ignore[arg-type]
+
+    assert client._username == username.encode()
+    assert client._password == password.encode()

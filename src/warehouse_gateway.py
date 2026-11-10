@@ -182,11 +182,15 @@ class WarehouseGateway:
         topic_parts = topic.split("/")
 
         if (
-            len(topic_parts) >= 5
-            and topic_parts[2] == "amr"
-            and topic_parts[-1] == "status"
+            len(topic_parts) == 5
+            and topic_parts[:3] == ["warehouse", GROUP_ID, "amr"]
+            and topic_parts[4] == "status"
         ):
             telemetry = RobotTelemetry.model_validate(data)
+            if telemetry.robot_id != topic_parts[3]:
+                raise ValueError(
+                    "AMR telemetry robot_id must match its MQTT topic identity"
+                )
             point = (
                 Point("Robots_status")
                 .tag("robot_id", telemetry.robot_id)

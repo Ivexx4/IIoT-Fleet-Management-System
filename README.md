@@ -84,6 +84,7 @@ A hierarquia reforça a separação de responsabilidades:
 * **Resposta de localização:** `{GroupID}/internal/infrastructure/location`. Cada resposta identifica `asset_type`, `asset_id`, `location_id`, `x`, `y` e, para prateleiras, `zone_id`.
 * **Submissão de encomendas:** `{GroupID}/v1/orders/submit`, QoS 1; o Coordinator publica a confirmação da aplicação em `{GroupID}/v1/orders/ack/{order_id}` após enfileirar a encomenda no Redis.
 * **Alertas críticos:** `{GroupID}/v1/alerts/critical`, QoS 1; o Gateway processa e deduplica alertas através do `alert_id`.
+* **Disponibilidade AMR:** `{GroupID}/internal/amr/{robot_id}/availability`, retained, com LWT `offline` e anúncio `online` após ligação.
 
 ### 3. Descoberta e gestão de infraestrutura
 
@@ -167,17 +168,26 @@ Consulte **Descoberta e gestão de infraestrutura** para os tópicos, intervalos
 * Grafana para administração: `http://${HOST_IP}:3000` (credenciais iniciais no `.env`).
 * InfluxDB API/UI: `http://${HOST_IP}:8086`.
 * Broker MQTT TLS: `${HOST_IP}:8883`; a CA local fica guardada num volume Docker.
-* Para submeter uma encomenda através do broker MQTT TLS:
+* Os utilitários de operação usam credenciais MQTT próprias e ACLs restritas (não reutilizam a credencial de serviço):
+
+```bash
+docker compose --profile tools run --rm client-order-injector --item item_A --qty 5 --station P1
+docker compose --profile tools run --rm manual-command-sender AMR-1 --charge
+```
+
+O utilizador `order-client` só pode publicar encomendas e ler confirmações; `manual-command` só pode publicar comandos de AMR. Define `MQTT_ORDER_PASSWORD` e `MQTT_COMMAND_PASSWORD` no `.env`; os valores de exemplo são apenas para desenvolvimento local.
+
+Para submeter uma encomenda através do broker MQTT TLS:
   ```bash
-  docker compose exec coordinator python src/client_order_injector.py --item item_A --qty 5 --station P1
+  docker compose --profile tools run --rm client-order-injector --item item_A --qty 5 --station P1
   ```
 * `docker compose down` pára a stack e mantém os dados. `docker compose down -v` também apaga os dados persistidos.
 
 ### Componentes e persistência
 
-O Coordinator persiste estado de robôs, prateleiras, estações, reservas, encomendas pendentes e ativos removidos no Redis com AOF. O alocador usa o algoritmo Hungarian para minimizar globalmente o tempo de rota estimado; CBS planeia em conjunto as rotas do lote, sobre a grelha de demonstração definida em `src/task_allocator.py`, não um mapa físico do armazém.
+O Coordinator persiste estado de robôs, prateleiras, estações, reservas, tarefas ativas, encomendas pendentes e ativos removidos no Redis com AOF. Com LWT e disponibilidade retida, uma desconexão inesperada marca o AMR offline e reencaminha idempotentemente a tarefa ativa para a fila. A confirmação de telemetria `IDLE` só conclui uma atribuição depois de o AMR ter iniciado a tarefa. O alocador usa o algoritmo Hungarian para minimizar globalmente o tempo de rota estimado; CBS já planeia rotas em espaço-tempo com restrições de ocupação de células e troca de arestas para os AMRs despachados em conjunto, sobre a grelha de demonstração definida em `src/task_allocator.py`, não um mapa físico do armazém. A verificação local de tráfego continua como salvaguarda.
 
-As mensagens são validadas com modelos Pydantic. Telemetria, comandos, encomendas e alertas críticos usam MQTT QoS 1 através do broker TLS autenticado; as mensagens de encomenda e alerta têm tópicos dedicados e consumidores com sessões persistentes e ACK manual após processamento. A submissão de encomendas espera também pela confirmação de aplicação do Coordinator, emitida depois da gravação idempotente no Redis. O `alert_id` é guardado no Redis pelo Gateway para deduplicar entregas repetidas, incluindo após reinício. O broker tem persistência ativada; QoS 1 oferece entrega *at least once*, pelo que os consumidores críticos mantêm idempotência. As posições contínuas dos AMRs são os campos `x` e `y` da medição `Robots_status` no InfluxDB. Os fluxos de encomendas e alertas já não usam sockets UDP nem segredos HMAC de aplicação.
+As mensagens são validadas com modelos Pydantic. Telemetria, comandos, encomendas e alertas críticos usam MQTT QoS 1 através do broker TLS autenticado; ACLs separam a credencial geral dos serviços das credenciais restritas de injeção de encomendas e comandos, e o Gateway valida que o ID da telemetria corresponde ao ID no tópico. As mensagens de encomenda e alerta têm tópicos dedicados e consumidores com sessões persistentes e ACK manual após processamento. A submissão de encomendas espera também pela confirmação de aplicação do Coordinator, emitida depois da gravação idempotente no Redis. O `alert_id` é guardado no Redis pelo Gateway para deduplicar entregas repetidas, incluindo após reinício. O broker tem persistência ativada; QoS 1 oferece entrega *at least once*, pelo que os consumidores críticos mantêm idempotência. As posições contínuas dos AMRs são os campos `x` e `y` da medição `Robots_status` no InfluxDB. Os fluxos de encomendas e alertas já não usam sockets UDP nem segredos HMAC de aplicação.
 
 ### Desenvolvimento e validação
 
@@ -190,3 +200,15 @@ pytest -q
 ```
 
 O GitHub Actions executa lint, formatação, mypy e pytest em cada push e pull request.
+
+### Teste de carga MQTT
+
+O benchmark opt-in `src/mqtt_load_test.py` simula AMRs a publicar telemetria QoS 1 e mede latência PUBACK do broker, entrega do Gateway e atualização de estado no Coordinator (p50/p95/p99/máximo), além de throughput e mensagens perdidas. Por omissão, executa 200 AMRs × 10 mensagens, com intervalo de 100 ms; aceita até 1 000 AMRs e 1 000 mensagens por AMR. Os limites de carga observados dependem do hardware, da configuração do broker e da rede — não são garantias de capacidade.
+
+Executar a partir da raiz do projeto:
+
+```bash
+docker compose --profile performance run --rm mqtt-load-test
+```
+
+Parâmetros podem ser passados ao container, por exemplo `--amrs 500 --messages-per-amr 20 --interval-ms 0 --timeout 120`. O teste inicia as dependências necessárias do Compose e não faz parte dos testes normais/CI.

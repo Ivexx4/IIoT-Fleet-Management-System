@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import time
 from collections.abc import Sequence
@@ -37,6 +38,7 @@ from task_allocator import (
 )
 
 TOPIC_INTERNAL = f"{GROUP_ID}/internal/#"
+TOPIC_COORDINATOR_AVAILABILITY = f"{GROUP_ID}/internal/coordinator/availability"
 TOPIC_DISPATCH = f"{GROUP_ID}/internal/tasks/dispatch"
 TOPIC_LOCATION_REQUEST = f"{GROUP_ID}/internal/infrastructure/location/request"
 TOPIC_LOCATION_REPORT = f"{GROUP_ID}/internal/infrastructure/location"
@@ -46,18 +48,72 @@ REDIS_STATIONS = "warehouse:stations"
 REDIS_REMOVED_SHELVES = "warehouse:removed-shelves"
 REDIS_REMOVED_STATIONS = "warehouse:removed-stations"
 REDIS_PENDING_ORDERS = "warehouse:pending-orders"
+REDIS_PENDING_ORDER_IDS = "warehouse:pending-order-ids"
 REDIS_RESERVED_ROBOTS = "warehouse:reserved-robots"
 REDIS_ORDER_IDS = "warehouse:order-ids"
+REDIS_ACTIVE_TASKS = "warehouse:active-tasks"
 CBS_TICK_SECONDS = 4.0
 CBS_START_DELAY_SECONDS = 5.0
 CBS_PICKUP_DWELL_STEPS = 2
+ROBOT_HEARTBEAT_TIMEOUT = float(os.getenv("ROBOT_HEARTBEAT_TIMEOUT", "5.0"))
 ENQUEUE_ORDER_SCRIPT = """
 if redis.call("SISMEMBER", KEYS[1], ARGV[1]) == 1 then
     return 0
 end
 redis.call("SADD", KEYS[1], ARGV[1])
 redis.call("RPUSH", KEYS[2], ARGV[2])
+redis.call("SADD", KEYS[3], ARGV[1])
 return 1
+"""
+ASSIGN_ORDER_SCRIPT = """
+if redis.call("LREM", KEYS[1], 1, ARGV[1]) == 0 then
+    return 0
+end
+redis.call("SREM", KEYS[4], ARGV[4])
+redis.call("HSET", KEYS[2], ARGV[2], ARGV[3])
+redis.call("SADD", KEYS[3], ARGV[2])
+return 1
+"""
+REQUEUE_OFFLINE_TASK_SCRIPT = """
+local assignment = redis.call("HGET", KEYS[1], ARGV[1])
+if not assignment then
+    redis.call("SREM", KEYS[3], ARGV[1])
+    return 0
+end
+local task = cjson.decode(assignment)
+if redis.call("SISMEMBER", KEYS[4], task.order_id) == 0 then
+    redis.call("LPUSH", KEYS[2], task.order)
+    redis.call("SADD", KEYS[4], task.order_id)
+end
+redis.call("HDEL", KEYS[1], ARGV[1])
+redis.call("SREM", KEYS[3], ARGV[1])
+return 1
+"""
+MARK_TASK_STARTED_SCRIPT = """
+local assignment = redis.call("HGET", KEYS[1], ARGV[1])
+if not assignment then
+    return 0
+end
+local task = cjson.decode(assignment)
+if not task.started then
+    task.started = true
+    redis.call("HSET", KEYS[1], ARGV[1], cjson.encode(task))
+end
+return 1
+"""
+COMPLETE_TASK_SCRIPT = """
+local assignment = redis.call("HGET", KEYS[1], ARGV[1])
+if not assignment then
+    redis.call("SREM", KEYS[2], ARGV[1])
+    return 0
+end
+local task = cjson.decode(assignment)
+if task.started then
+    redis.call("HDEL", KEYS[1], ARGV[1])
+    redis.call("SREM", KEYS[2], ARGV[1])
+    return 1
+end
+return 0
 """
 
 
@@ -92,6 +148,9 @@ class RedisState(Protocol):
 
 
 class FleetCoordinator:
+    robot_last_seen: dict[str, float] = {}
+    robot_heartbeat_timeout: float = ROBOT_HEARTBEAT_TIMEOUT
+
     def __init__(self) -> None:
         redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
         self.redis: RedisState = cast(RedisState, redis_client)
@@ -103,11 +162,19 @@ class FleetCoordinator:
         )
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
+        self.client.will_set(
+            TOPIC_COORDINATOR_AVAILABILITY,
+            json.dumps({"status": "offline"}),
+            qos=MQTT_QOS,
+            retain=True,
+        )
         self.lock = threading.Lock()
         self.gateway_online = False
         self.last_discovery_request: dict[str, float] = {}
         self.discovery_interval = 30.0
         self.discovery_retry_interval = 5.0
+        self.robot_last_seen: dict[str, float] = {}
+        self.robot_heartbeat_timeout = ROBOT_HEARTBEAT_TIMEOUT
 
     def start(self) -> None:
         self.client.connect(MQTT_BROKER, MQTT_PORT, 60)
@@ -122,6 +189,12 @@ class FleetCoordinator:
             self.close()
 
     def close(self) -> None:
+        self.client.publish(
+            TOPIC_COORDINATOR_AVAILABILITY,
+            json.dumps({"status": "offline"}),
+            qos=MQTT_QOS,
+            retain=True,
+        )
         self.client.loop_stop()
         self.client.disconnect()
         self.redis.close()
@@ -142,6 +215,12 @@ class FleetCoordinator:
                 (TOPIC_INTERNAL, MQTT_QOS),
                 (TOPIC_ORDER_SUBMIT, MQTT_QOS),
             ]
+        )
+        client.publish(
+            TOPIC_COORDINATOR_AVAILABILITY,
+            json.dumps({"status": "online"}),
+            qos=MQTT_QOS,
+            retain=True,
         )
         print(f"Listening for fleet state on {TOPIC_INTERNAL}")
         self.request_infrastructure_locations()
@@ -306,15 +385,15 @@ class FleetCoordinator:
             else:
                 client.ack(message.mid, message.qos)
             return
-        self.on_internal_message(client, userdata, message)
-        client.ack(message.mid, message.qos)
+        if self.on_internal_message(client, userdata, message):
+            client.ack(message.mid, message.qos)
 
     def on_internal_message(
         self,
         client: mqtt.Client,
         userdata: Any,
         message: mqtt.MQTTMessage,
-    ) -> None:
+    ) -> bool:
         try:
             topic_parts = message.topic.split("/")
             payload = json.loads(message.payload.decode("utf-8"))
@@ -334,24 +413,34 @@ class FleetCoordinator:
                         location.asset_id,
                     )
                 ):
-                    return
+                    return True
                 print(
                     f"Registered {location.asset_type} {location.asset_id} "
                     f"at {location.location_id} ({location.x}, {location.y})"
                 )
-                return
+                return True
             if (
                 len(topic_parts) >= 4
                 and topic_parts[2] == "gateway"
                 and topic_parts[-1] == "availability"
             ):
                 self.gateway_online = payload.get("status") == "online"
-                return
+                return True
             if len(topic_parts) >= 5 and topic_parts[2] == "amr":
                 robot_id = payload.get("robot_id")
                 if topic_parts[-1] == "availability":
-                    if robot_id and payload.get("status") == "offline":
+                    if (
+                        len(topic_parts) != 5
+                        or robot_id != topic_parts[3]
+                        or payload.get("status") not in {"online", "offline"}
+                    ):
+                        print(
+                            f"Rejected mismatched AMR availability on {message.topic}"
+                        )
+                        return True
+                    if payload["status"] == "offline":
                         with self.lock:
+                            self.robot_last_seen.pop(robot_id, None)
                             robot_json = self.redis.hget(REDIS_ROBOTS, robot_id)
                             if robot_json:
                                 robot = json.loads(robot_json)
@@ -361,19 +450,40 @@ class FleetCoordinator:
                                     robot_id,
                                     json.dumps(robot),
                                 )
-                    return
+                            self._requeue_robot_task(robot_id)
+                    elif payload["status"] == "online":
+                        with self.lock:
+                            self.robot_last_seen[robot_id] = time.monotonic()
+                    return True
                 telemetry = RobotTelemetry.model_validate(payload)
+                if len(topic_parts) != 5 or telemetry.robot_id != topic_parts[3]:
+                    print(f"Rejected mismatched AMR telemetry on {message.topic}")
+                    return True
                 state = telemetry.model_dump()
                 state["availability"] = "online"
                 with self.lock:
+                    self.robot_last_seen[telemetry.robot_id] = time.monotonic()
                     self.redis.hset(
                         REDIS_ROBOTS,
                         telemetry.robot_id,
                         json.dumps(state),
                     )
                     if telemetry.status == "IDLE":
-                        self.redis.srem(REDIS_RESERVED_ROBOTS, telemetry.robot_id)
-                return
+                        self.redis.eval(
+                            COMPLETE_TASK_SCRIPT,
+                            2,
+                            REDIS_ACTIVE_TASKS,
+                            REDIS_RESERVED_ROBOTS,
+                            telemetry.robot_id,
+                        )
+                    else:
+                        self.redis.eval(
+                            MARK_TASK_STARTED_SCRIPT,
+                            1,
+                            REDIS_ACTIVE_TASKS,
+                            telemetry.robot_id,
+                        )
+                return True
 
             if len(topic_parts) >= 5 and topic_parts[2:3] == ["static"]:
                 shelf = ShelfTelemetry.model_validate(payload)
@@ -381,7 +491,7 @@ class FleetCoordinator:
                     self._request_location_if_unknown("shelf", shelf.asset_id)
                 if not self.redis.sismember(REDIS_REMOVED_SHELVES, shelf.asset_id):
                     self.add_shelf(shelf)
-                return
+                return True
 
             if (
                 len(topic_parts) >= 5
@@ -400,10 +510,26 @@ class FleetCoordinator:
                     station.station_id,
                 ):
                     self.add_station(station)
+            return True
         except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as error:
             print(f"Rejected internal MQTT message on {message.topic}: {error}")
+            return True
         except Exception as error:
             print(f"Failed to update coordinator state from MQTT: {error}")
+            return False
+
+    def _requeue_robot_task(self, robot_id: str) -> None:
+        requeued = self.redis.eval(
+            REQUEUE_OFFLINE_TASK_SCRIPT,
+            4,
+            REDIS_ACTIVE_TASKS,
+            REDIS_PENDING_ORDERS,
+            REDIS_RESERVED_ROBOTS,
+            REDIS_PENDING_ORDER_IDS,
+            robot_id,
+        )
+        if requeued:
+            print(f"Requeued task for offline AMR {robot_id}")
 
     def process_order_message(self, payload: bytes) -> None:
         order = Order.model_validate_json(payload)
@@ -414,9 +540,10 @@ class FleetCoordinator:
         }
         enqueued = self.redis.eval(
             ENQUEUE_ORDER_SCRIPT,
-            2,
+            3,
             REDIS_ORDER_IDS,
             REDIS_PENDING_ORDERS,
+            REDIS_PENDING_ORDER_IDS,
             order_id,
             json.dumps(order_record),
         )
@@ -435,7 +562,35 @@ class FleetCoordinator:
             )
         print(f"Queued order {order_id}: {order.item} x{order.quantity}")
 
+    def check_robot_timeouts(self, now: float | None = None) -> list[str]:
+        if now is None:
+            now = time.monotonic()
+        timed_out: list[str] = []
+        with self.lock:
+            robots = self.redis.hgetall(REDIS_ROBOTS)
+            for robot_id, robot_json in robots.items():
+                try:
+                    robot = json.loads(robot_json)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if robot.get("availability") == "online":
+                    last_seen = self.robot_last_seen.get(robot_id)
+                    if last_seen is None:
+                        self.robot_last_seen[robot_id] = now
+                    elif (now - last_seen) > self.robot_heartbeat_timeout:
+                        timed_out.append(robot_id)
+                        robot["availability"] = "offline"
+                        self.redis.hset(REDIS_ROBOTS, robot_id, json.dumps(robot))
+                        self._requeue_robot_task(robot_id)
+                        self.robot_last_seen.pop(robot_id, None)
+                        print(
+                            f"AMR {robot_id} timed out after "
+                            f"{now - last_seen:.1f}s of inactivity"
+                        )
+        return timed_out
+
     def process_logic(self) -> None:
+        self.check_robot_timeouts()
         if not self.gateway_online:
             return
         with self.lock:
@@ -598,6 +753,16 @@ class FleetCoordinator:
                 print(f"MQTT rejected planned route for {robot_id}")
                 continue
             plan_info.wait_for_publish(timeout=5)
+            if not plan_info.is_published():
+                print(f"Broker did not acknowledge planned route for {robot_id}")
+                continue
+            active_task = json.dumps(
+                {
+                    "order_id": order_data["order_id"],
+                    "order": raw_order,
+                    "started": False,
+                }
+            )
             command = {
                 "robot_id": robot_id,
                 "command": "EXECUTE_TASK",
@@ -605,18 +770,65 @@ class FleetCoordinator:
                 "target_station_id": order.pack_station,
                 "quantity": order.quantity,
             }
-            info = self.client.publish(
-                TOPIC_DISPATCH,
-                json.dumps(command),
-                qos=MQTT_QOS,
-            )
-            if info.rc != mqtt.MQTT_ERR_SUCCESS:
-                print(f"MQTT rejected task dispatch for {robot_id}")
-                continue
-            info.wait_for_publish(timeout=5)
             with self.lock:
-                self.redis.sadd(REDIS_RESERVED_ROBOTS, robot_id)
-                self.redis.lrem(REDIS_PENDING_ORDERS, 1, raw_order)
+                current_robot_json = self.redis.hget(REDIS_ROBOTS, robot_id)
+                if (
+                    current_robot_json is None
+                    or json.loads(current_robot_json).get("availability") != "online"
+                ):
+                    print(f"Skipped dispatch to unavailable AMR {robot_id}")
+                    self.client.publish(
+                        plan_topic,
+                        b"",
+                        qos=MQTT_QOS,
+                        retain=True,
+                    )
+                    continue
+                assigned = self.redis.eval(
+                    ASSIGN_ORDER_SCRIPT,
+                    4,
+                    REDIS_PENDING_ORDERS,
+                    REDIS_ACTIVE_TASKS,
+                    REDIS_RESERVED_ROBOTS,
+                    REDIS_PENDING_ORDER_IDS,
+                    raw_order,
+                    robot_id,
+                    active_task,
+                    order_data["order_id"],
+                )
+                if not assigned:
+                    self.client.publish(
+                        plan_topic,
+                        b"",
+                        qos=MQTT_QOS,
+                        retain=True,
+                    )
+                    continue
+                try:
+                    info = self.client.publish(
+                        TOPIC_DISPATCH,
+                        json.dumps(command),
+                        qos=MQTT_QOS,
+                    )
+                    if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                        raise RuntimeError(
+                            f"MQTT rejected task dispatch for {robot_id}"
+                        )
+                    info.wait_for_publish(timeout=5)
+                    if not info.is_published():
+                        raise TimeoutError(
+                            f"Broker did not acknowledge task dispatch for {robot_id}"
+                        )
+                except (RuntimeError, TimeoutError) as error:
+                    self._requeue_robot_task(robot_id)
+                    self.client.publish(
+                        plan_topic,
+                        b"",
+                        qos=MQTT_QOS,
+                        retain=True,
+                    )
+                    print(f"Dispatch failed for {robot_id}: {error}")
+                    continue
             print(
                 f"Assigned order {order_data['order_id']} ({order.item}) to {robot_id}"
             )
