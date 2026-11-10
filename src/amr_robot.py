@@ -98,6 +98,10 @@ class AMRRobot:
 
         self.topic_pub = f"warehouse/{group_id}/amr/{robot_id}/status"
         self.topic_sub = f"warehouse/{group_id}/amr/{robot_id}/command"
+        self.topic_plan = f"warehouse/{group_id}/amr/{robot_id}/plan"
+        self.planned_routes: dict[str, tuple[list[GridPoint], float, float]] = {}
+        self.planned_start_at: float | None = None
+        self.planned_tick_seconds = 0.0
 
         self.last_battery_update = time.monotonic()
         self.last_telemetry_update = self.last_battery_update
@@ -126,6 +130,7 @@ class AMRRobot:
                 [
                     (self.topic_sub, MQTT_QOS),
                     (f"warehouse/{self.group_id}/amr/+/status", MQTT_QOS),
+                    (self.topic_plan, MQTT_QOS),
                 ]
             )
             client.publish(
@@ -144,6 +149,9 @@ class AMRRobot:
         userdata: Any,
         msg: mqtt.MQTTMessage,
     ) -> None:
+        if msg.topic == self.topic_plan:
+            self._cache_planned_routes(msg.payload)
+            return
         if msg.topic.endswith("/status"):
             try:
                 telemetry = RobotTelemetry.model_validate_json(msg.payload)
@@ -231,6 +239,23 @@ class AMRRobot:
         start = (round(self.x), round(self.y))
         destination = location_coordinates(target)
         self.route = plan_grid_route(start, destination)
+        planned_route = self.planned_routes.pop(target, None)
+        if planned_route is not None:
+            self.client.publish(self.topic_plan, b"", qos=MQTT_QOS, retain=True)
+            candidate, start_at, tick_seconds = planned_route
+            if candidate[0] == start and candidate[-1] == destination:
+                self.route = candidate
+                self.planned_start_at = start_at
+                self.planned_tick_seconds = tick_seconds
+            else:
+                print(
+                    f"[{self.robot_id}] Ignoring mismatched planned route to {target}"
+                )
+                self.planned_start_at = None
+                self.planned_tick_seconds = 0.0
+        else:
+            self.planned_start_at = None
+            self.planned_tick_seconds = 0.0
         self.route_index = 1
         self.segment_start = start
         self.segment_elapsed = 0.0
@@ -249,6 +274,53 @@ class AMRRobot:
         self.publish_status()
         if self.route_index >= len(self.route):
             self._arrive_at_destination()
+
+    def _cache_planned_routes(self, payload: bytes) -> None:
+        try:
+            message = json.loads(payload.decode("utf-8"))
+            legs = message["legs"]
+            if not isinstance(legs, list):
+                raise ValueError("Planned route legs must be a list")
+            routes: dict[str, tuple[list[GridPoint], float, float]] = {}
+            for leg in legs:
+                target = leg["target"]
+                raw_route = leg["route"]
+                start_at = float(leg["start_at"])
+                tick_seconds = float(leg["tick_seconds"])
+                if (
+                    not isinstance(target, str)
+                    or not isinstance(raw_route, list)
+                    or not raw_route
+                    or tick_seconds <= 0
+                ):
+                    raise ValueError("Invalid planned route")
+                route: list[GridPoint] = []
+                for point in raw_route:
+                    if (
+                        not isinstance(point, list)
+                        or len(point) != 2
+                        or any(not isinstance(value, int) for value in point)
+                    ):
+                        raise ValueError("Planned route cells must be integer pairs")
+                    route.append((point[0], point[1]))
+                if route[-1] != location_coordinates(target):
+                    raise ValueError(f"Planned route does not end at {target}")
+                routes[target] = (
+                    route,
+                    time.monotonic() + start_at - time.time(),
+                    tick_seconds,
+                )
+            if not routes:
+                raise ValueError("Planned route contains no legs")
+            self.planned_routes.update(routes)
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            print(f"[{self.robot_id}] Rejected planned route: {error}")
 
     def _traffic_blocker(self, target: GridPoint) -> str | None:
         now = time.monotonic()
@@ -279,6 +351,8 @@ class AMRRobot:
         self.location_id = target
         self.route = []
         self.route_index = 0
+        self.planned_start_at = None
+        self.planned_tick_seconds = 0.0
         self.movement_status = None
         self.movement_target = None
         next_state = {
@@ -318,11 +392,28 @@ class AMRRobot:
                 self.status = self.movement_status or "STALLED"
             return
 
+        if self.planned_start_at is not None and self.route_index < len(self.route):
+            step_start = (
+                self.planned_start_at
+                + (self.route_index - 1) * self.planned_tick_seconds
+            )
+            if now < step_start:
+                self.battery = max(0.0, self.battery - elapsed * IDLE_BATTERY_RATE)
+                return
+
         if self.route_index >= len(self.route):
             self._arrive_at_destination()
             return
 
         target = self.route[self.route_index]
+        if self.planned_start_at is not None and target == self.segment_start:
+            wait_end = (
+                self.planned_start_at + (self.route_index) * self.planned_tick_seconds
+            )
+            if now >= wait_end:
+                self.route_index += 1
+            self.battery = max(0.0, self.battery - elapsed * IDLE_BATTERY_RATE)
+            return
         blocker = self._traffic_blocker(target)
         if blocker is not None:
             self.status = "STALLED_TRAFFIC"

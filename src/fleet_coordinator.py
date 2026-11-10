@@ -2,6 +2,7 @@ import json
 import socket
 import threading
 import time
+from collections.abc import Sequence
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
@@ -26,7 +27,14 @@ from mqtt_config import (
     UDP_HMAC_SECRET,
     create_mqtt_client,
 )
-from task_allocator import minimum_cost_assignment, route_cost
+from task_allocator import (
+    WAREHOUSE_OBSTACLES,
+    GridPoint,
+    location_coordinates,
+    minimum_cost_assignment,
+    plan_multi_agent_routes,
+    route_cost,
+)
 from udp_auth import UdpAuthenticationError, UdpAuthenticator
 
 UDP_HOST = "0.0.0.0"
@@ -43,6 +51,9 @@ REDIS_REMOVED_STATIONS = "warehouse:removed-stations"
 REDIS_PENDING_ORDERS = "warehouse:pending-orders"
 REDIS_RESERVED_ROBOTS = "warehouse:reserved-robots"
 REDIS_ORDER_IDS = "warehouse:order-ids"
+CBS_TICK_SECONDS = 4.0
+CBS_START_DELAY_SECONDS = 5.0
+CBS_PICKUP_DWELL_STEPS = 2
 ENQUEUE_ORDER_SCRIPT = """
 if redis.call("SISMEMBER", KEYS[1], ARGV[1]) == 1 then
     return 0
@@ -446,9 +457,12 @@ class FleetCoordinator:
             for shelf_id, shelf_json in shelves.items()
         }
         order_rows: list[tuple[str, dict[str, Any], Order, str]] = []
+        selected_stations: set[str] = set()
         for raw_order in pending:
             order_data = json.loads(raw_order)
             order = Order.model_validate(order_data)
+            if order.pack_station in selected_stations:
+                continue
             matching_shelves = [
                 (shelf_id, shelf)
                 for shelf_id, shelf in parsed_shelves.items()
@@ -463,6 +477,7 @@ class FleetCoordinator:
             if matching_shelves:
                 shelf_id, _ = matching_shelves[0]
                 order_rows.append((raw_order, order_data, order, shelf_id))
+                selected_stations.add(order.pack_station)
             if len(order_rows) >= len(available_robots):
                 break
         if not order_rows:
@@ -502,9 +517,80 @@ class FleetCoordinator:
             costs.append(cost_row)
 
         assignments = minimum_cost_assignment(costs)
+        selected: list[tuple[int, int, str, RobotTelemetry]] = []
+        for robot_index, order_index in assignments:
+            robot_id, robot = available_robots[robot_index]
+            selected.append((robot_index, order_index, robot_id, robot))
+        starts: dict[str, GridPoint] = {}
+        waypoint_map: dict[str, Sequence[GridPoint]] = {}
+        for robot_index, order_index, robot_id, robot in selected:
+            fallback = location_coordinates(robot.location_id)
+            starts[robot_id] = (
+                round(robot.x) if robot.x is not None else fallback[0],
+                round(robot.y) if robot.y is not None else fallback[1],
+            )
+            shelf = location_coordinates(
+                f"SHELF-{shelf_choices[(robot_index, order_index)]}"
+            )
+            station = location_coordinates(order_rows[order_index][2].pack_station)
+            waypoint_map[robot_id] = (shelf, station)
+        try:
+            planned_routes = plan_multi_agent_routes(
+                starts,
+                waypoint_map,
+                obstacles=WAREHOUSE_OBSTACLES,
+                waypoint_dwell_steps=CBS_PICKUP_DWELL_STEPS,
+            )
+        except ValueError as error:
+            print(f"Deferred task dispatch because CBS could not plan routes: {error}")
+            return
+
+        route_start = time.time() + CBS_START_DELAY_SECONDS
+        planned_messages: dict[str, dict[str, Any]] = {}
+        for robot_index, order_index, robot_id, _ in selected:
+            route = planned_routes[robot_id]
+            shelf = waypoint_map[robot_id][0]
+            shelf_index = next(
+                index for index, cell in enumerate(route) if cell == shelf
+            )
+            station_start_index = shelf_index + CBS_PICKUP_DWELL_STEPS
+            station_route = route[station_start_index:]
+            if not station_route or station_route[0] != shelf:
+                raise RuntimeError(f"CBS route for {robot_id} omitted its station leg")
+            order = order_rows[order_index][2]
+            shelf_id = shelf_choices[(robot_index, order_index)]
+            planned_messages[robot_id] = {
+                "legs": [
+                    {
+                        "target": f"SHELF-{shelf_id}",
+                        "route": route[: shelf_index + 1],
+                        "start_at": route_start,
+                        "tick_seconds": CBS_TICK_SECONDS,
+                    },
+                    {
+                        "target": f"STATION-{order.pack_station}",
+                        "route": station_route,
+                        "start_at": route_start
+                        + station_start_index * CBS_TICK_SECONDS,
+                        "tick_seconds": CBS_TICK_SECONDS,
+                    },
+                ]
+            }
+
         for robot_index, order_index in assignments:
             raw_order, order_data, order, _ = order_rows[order_index]
             robot_id, _ = available_robots[robot_index]
+            plan_topic = f"warehouse/{GROUP_ID}/amr/{robot_id}/plan"
+            plan_info = self.client.publish(
+                plan_topic,
+                json.dumps(planned_messages[robot_id]),
+                qos=MQTT_QOS,
+                retain=True,
+            )
+            if plan_info.rc != mqtt.MQTT_ERR_SUCCESS:
+                print(f"MQTT rejected planned route for {robot_id}")
+                continue
+            plan_info.wait_for_publish(timeout=5)
             command = {
                 "robot_id": robot_id,
                 "command": "EXECUTE_TASK",

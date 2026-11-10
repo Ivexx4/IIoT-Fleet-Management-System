@@ -4,6 +4,7 @@ from amr_robot import AMRRobot
 from models import RobotTelemetry
 from task_allocator import (
     plan_grid_route,
+    plan_multi_agent_routes,
     route_cost,
     segment_distance_at_time,
     segment_travel_time,
@@ -24,6 +25,51 @@ def test_route_planner_detours_around_blocked_cell() -> None:
 def test_route_planner_rejects_blocked_endpoints() -> None:
     with pytest.raises(ValueError, match="blocked cells"):
         plan_grid_route((4, 5), (5, 5))
+
+
+def test_cbs_routes_agents_without_vertex_or_edge_conflicts() -> None:
+    routes = plan_multi_agent_routes(
+        {"AMR-1": (0, 1), "AMR-2": (2, 1)},
+        {"AMR-1": ((2, 1),), "AMR-2": ((0, 1),)},
+        bounds=(0, 0, 2, 2),
+    )
+
+    assert routes["AMR-1"][0] == (0, 1)
+    assert routes["AMR-1"][-1] == (2, 1)
+    assert routes["AMR-2"][0] == (2, 1)
+    assert routes["AMR-2"][-1] == (0, 1)
+    horizon = max(map(len, routes.values()))
+    for tick in range(horizon):
+        first = routes["AMR-1"][min(tick, len(routes["AMR-1"]) - 1)]
+        second = routes["AMR-2"][min(tick, len(routes["AMR-2"]) - 1)]
+        assert first != second
+        if tick + 1 < horizon:
+            first_next = routes["AMR-1"][min(tick + 1, len(routes["AMR-1"]) - 1)]
+            second_next = routes["AMR-2"][min(tick + 1, len(routes["AMR-2"]) - 1)]
+            assert (first, first_next) != (second_next, second)
+
+
+def test_cbs_preserves_waypoint_dwell_for_following_leg() -> None:
+    route = plan_multi_agent_routes(
+        {"AMR-1": (0, 0)},
+        {"AMR-1": ((1, 0), (2, 0))},
+        bounds=(0, 0, 2, 1),
+        waypoint_dwell_steps=2,
+    )["AMR-1"]
+
+    shelf_index = route.index((1, 0))
+    assert route[shelf_index : shelf_index + 3] == [(1, 0)] * 3
+    assert route[-1] == (2, 0)
+
+
+def test_cbs_rejects_impossible_corridor_swap() -> None:
+    with pytest.raises(ValueError, match="CBS"):
+        plan_multi_agent_routes(
+            {"AMR-1": (0, 0), "AMR-2": (2, 0)},
+            {"AMR-1": ((2, 0),), "AMR-2": ((0, 0),)},
+            bounds=(0, 0, 2, 0),
+            max_high_level_nodes=100,
+        )
 
 
 def test_segment_motion_accelerates_and_brakes() -> None:

@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from heapq import heappop, heappush
+from itertools import count
 from math import inf
 
 
@@ -256,3 +257,242 @@ def minimum_cost_assignment(
         if matching[column] != 0
     ]
     return [(column, row) for row, column in pairs] if transposed else pairs
+
+
+def plan_multi_agent_routes(
+    starts: dict[str, GridPoint],
+    waypoints: dict[str, Sequence[GridPoint]],
+    obstacles: frozenset[GridPoint] = WAREHOUSE_OBSTACLES,
+    bounds: tuple[int, int, int, int] = (0, 0, 10, 10),
+    waypoint_dwell_steps: int = 0,
+    max_high_level_nodes: int = 10_000,
+) -> dict[str, list[GridPoint]]:
+    """Find conflict-free discrete-time routes with Conflict-Based Search."""
+    if starts.keys() != waypoints.keys():
+        raise ValueError("Every agent must have a start and at least one waypoint")
+    if waypoint_dwell_steps < 0:
+        raise ValueError("Waypoint dwell steps must be non-negative")
+    if max_high_level_nodes < 1:
+        raise ValueError("CBS node limit must be positive")
+
+    min_x, min_y, max_x, max_y = bounds
+    if min_x > max_x or min_y > max_y:
+        raise ValueError("Grid bounds are invalid")
+
+    agents = sorted(starts)
+    if any(not waypoints[agent] for agent in agents):
+        raise ValueError("Every agent must have at least one waypoint")
+    locations = [starts[agent] for agent in agents]
+    if len(set(locations)) != len(locations):
+        raise ValueError("Agents cannot share a start cell")
+    for agent in agents:
+        points = (starts[agent], *waypoints[agent])
+        if any(
+            point in obstacles
+            or not min_x <= point[0] <= max_x
+            or not min_y <= point[1] <= max_y
+            for point in points
+        ):
+            raise ValueError(f"Agent {agent} has a waypoint outside the free grid")
+
+    vertex_constraints: dict[str, set[tuple[GridPoint, int]]] = {
+        agent: set() for agent in agents
+    }
+    edge_constraints: dict[str, set[tuple[GridPoint, GridPoint, int]]] = {
+        agent: set() for agent in agents
+    }
+    cell_count = (max_x - min_x + 1) * (max_y - min_y + 1)
+    max_time = cell_count * max(2, len(agents)) * 2
+    directions = ((1, 0), (0, 1), (-1, 0), (0, -1), (0, 0))
+
+    def low_level_search(
+        agent: str,
+        forbidden_vertices: set[tuple[GridPoint, int]],
+        forbidden_edges: set[tuple[GridPoint, GridPoint, int]],
+    ) -> list[GridPoint]:
+        goals = waypoints[agent]
+        start = starts[agent]
+        stage = 0
+        dwell = 0
+        if start == goals[0]:
+            stage = 1
+            dwell = waypoint_dwell_steps
+
+        initial = (start, 0, stage, dwell)
+        frontier: list[tuple[int, int, int, GridPoint, int, int]] = []
+        heappush(
+            frontier,
+            (
+                sum(abs(start[axis] - goals[0][axis]) for axis in (0, 1)),
+                0,
+                0,
+                start,
+                stage,
+                dwell,
+            ),
+        )
+        parents: dict[
+            tuple[GridPoint, int, int, int],
+            tuple[GridPoint, int, int, int] | None,
+        ] = {initial: None}
+
+        while frontier:
+            _, elapsed, _, current, current_stage, current_dwell = heappop(frontier)
+            state = (current, elapsed, current_stage, current_dwell)
+            if (
+                current_stage == len(goals)
+                and current_dwell == 0
+                and current == goals[-1]
+                and all(
+                    (goals[-1], future_time) not in forbidden_vertices
+                    and (goals[-1], goals[-1], future_time) not in forbidden_edges
+                    for future_time in range(elapsed + 1, max_time + 1)
+                )
+            ):
+                path: list[GridPoint] = []
+                cursor: tuple[GridPoint, int, int, int] | None = state
+                while cursor is not None:
+                    path.append(cursor[0])
+                    cursor = parents[cursor]
+                return list(reversed(path))
+            if elapsed >= max_time:
+                continue
+
+            next_time = elapsed + 1
+            moves = (
+                (current,)
+                if current_dwell
+                else ((current[0] + dx, current[1] + dy) for dx, dy in directions)
+            )
+            for neighbor in moves:
+                if neighbor in obstacles or not (
+                    min_x <= neighbor[0] <= max_x and min_y <= neighbor[1] <= max_y
+                ):
+                    continue
+                if (neighbor, next_time) in forbidden_vertices:
+                    continue
+                if (current, neighbor, elapsed) in forbidden_edges:
+                    continue
+
+                next_stage = current_stage
+                next_dwell = max(0, current_dwell - 1)
+                if not current_dwell and next_stage < len(goals):
+                    if neighbor == goals[next_stage]:
+                        next_stage += 1
+                        next_dwell = waypoint_dwell_steps
+                next_state = (neighbor, next_time, next_stage, next_dwell)
+                if next_state in parents:
+                    continue
+                parents[next_state] = state
+
+                remaining = 0
+                estimate_from = neighbor
+                for goal in goals[next_stage:]:
+                    remaining += abs(estimate_from[0] - goal[0]) + abs(
+                        estimate_from[1] - goal[1]
+                    )
+                    estimate_from = goal
+                remaining += (
+                    next_dwell
+                    + max(0, len(goals) - next_stage - 1) * waypoint_dwell_steps
+                )
+                heappush(
+                    frontier,
+                    (
+                        next_time + remaining,
+                        next_time,
+                        len(parents),
+                        neighbor,
+                        next_stage,
+                        next_dwell,
+                    ),
+                )
+        raise ValueError(f"CBS found no route for agent {agent}")
+
+    def find_conflict(
+        routes: dict[str, list[GridPoint]],
+    ) -> tuple[str, str, str, int, GridPoint, GridPoint | None] | None:
+        route_agents = sorted(routes)
+        horizon = max(map(len, routes.values()))
+
+        def position(agent: str, tick: int) -> GridPoint:
+            route = routes[agent]
+            return route[min(tick, len(route) - 1)]
+
+        for tick in range(horizon):
+            for first_index, first in enumerate(route_agents):
+                for second in route_agents[first_index + 1 :]:
+                    first_cell = position(first, tick)
+                    second_cell = position(second, tick)
+                    if first_cell == second_cell:
+                        return ("vertex", first, second, tick, first_cell, None)
+                    if tick + 1 >= horizon:
+                        continue
+                    first_next = position(first, tick + 1)
+                    second_next = position(second, tick + 1)
+                    if first_cell == second_next and second_cell == first_next:
+                        return (
+                            "edge",
+                            first,
+                            second,
+                            tick,
+                            first_cell,
+                            first_next,
+                        )
+        return None
+
+    initial_routes = {agent: low_level_search(agent, set(), set()) for agent in agents}
+    queue: list[
+        tuple[
+            int,
+            int,
+            dict[str, list[GridPoint]],
+            dict[str, set[tuple[GridPoint, int]]],
+            dict[str, set[tuple[GridPoint, GridPoint, int]]],
+        ]
+    ] = []
+    tie_breaker = count()
+
+    def enqueue(
+        routes: dict[str, list[GridPoint]],
+        vertices: dict[str, set[tuple[GridPoint, int]]],
+        edges: dict[str, set[tuple[GridPoint, GridPoint, int]]],
+    ) -> None:
+        total_cost = sum(len(route) - 1 for route in routes.values())
+        heappush(
+            queue,
+            (total_cost, next(tie_breaker), routes, vertices, edges),
+        )
+
+    enqueue(initial_routes, vertex_constraints, edge_constraints)
+    expanded = 0
+    while queue and expanded < max_high_level_nodes:
+        _, _, routes, vertices, edges = heappop(queue)
+        expanded += 1
+        conflict = find_conflict(routes)
+        if conflict is None:
+            return routes
+
+        kind, first, second, tick, cell, next_cell = conflict
+        for agent in (first, second):
+            next_vertices = {name: set(value) for name, value in vertices.items()}
+            next_edges = {name: set(value) for name, value in edges.items()}
+            if kind == "vertex":
+                next_vertices[agent].add((cell, tick))
+            else:
+                assert next_cell is not None
+                route = routes[agent]
+                current = route[min(tick, len(route) - 1)]
+                following = route[min(tick + 1, len(route) - 1)]
+                next_edges[agent].add((current, following, tick))
+            try:
+                replacement = low_level_search(
+                    agent, next_vertices[agent], next_edges[agent]
+                )
+            except ValueError:
+                continue
+            next_routes = dict(routes)
+            next_routes[agent] = replacement
+            enqueue(next_routes, next_vertices, next_edges)
+
+    raise ValueError("CBS could not find conflict-free routes within its search limit")

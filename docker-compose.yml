@@ -1,5 +1,6 @@
 x-app-environment: &app-environment
   WAREHOUSE_GROUP_ID: ${WAREHOUSE_GROUP_ID:-demo}
+  HOST_IP: ${HOST_IP:-127.0.0.1}
   MQTT_BROKER: mosquitto
   MQTT_PORT: "8883"
   MQTT_USERNAME: ${MQTT_USERNAME:-warehouse}
@@ -18,8 +19,9 @@ services:
     environment:
       MQTT_USERNAME: ${MQTT_USERNAME:-warehouse}
       MQTT_PASSWORD: ${MQTT_PASSWORD:-warehouse-dev-only}
+      HOST_IP: ${HOST_IP:-127.0.0.1}
     ports:
-      - "127.0.0.1:8883:8883"
+      - "${HOST_IP:-127.0.0.1}:8883:8883"
     volumes:
       - mqtt-data:/mosquitto/data
       - mqtt-certs:/mosquitto/certs
@@ -43,6 +45,8 @@ services:
     volumes:
       - influx-data:/var/lib/influxdb2
       - influx-config:/etc/influxdb2
+    ports:
+      - "${HOST_IP:-127.0.0.1}:8086:8086"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8086/health"]
       interval: 10s
@@ -86,7 +90,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       UDP_HMAC_SECRET: ${UDP_HMAC_SECRET:-local-demo-hmac-secret-change-before-deploy-0123456789}
     ports:
-      - "127.0.0.1:9091:9091/udp"
+      - "${HOST_IP:-127.0.0.1}:9091:9091/udp"
     volumes:
       - mqtt-certs:/run/mqtt-certs:ro
     depends_on:
@@ -171,17 +175,33 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin-dev-only}
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       INFLUX_ORG: ${INFLUX_ORG:-warehouse}
       INFLUX_BUCKET: ${INFLUX_BUCKET:-warehouse_data}
       INFLUX_TOKEN: ${INFLUX_TOKEN:-local-dev-token}
     ports:
-      - "127.0.0.1:3000:3000"
+      - "${HOST_IP:-127.0.0.1}:3000:3000"
     volumes:
       - grafana-data:/var/lib/grafana
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       influxdb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  visualizer:
+    build: .
+    command: ["python", "src/visualizer.py"]
+    environment: *app-environment
+    ports:
+      - "${HOST_IP:-127.0.0.1}:8080:8080"
+    volumes:
+      - mqtt-certs:/run/mqtt-certs:ro
+    depends_on:
+      mosquitto:
         condition: service_healthy
     restart: unless-stopped
 

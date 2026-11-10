@@ -26,6 +26,7 @@ flowchart LR
     Redis[(Redis)]
     Influx[(InfluxDB)]
     Grafana[Grafana dashboard]
+    Visualizer[Live warehouse map]
     Client[Order client UDP]
 
     AMRs -->|Telemetry and commands| Broker
@@ -44,6 +45,7 @@ flowchart LR
     Coordinator <--> Redis
     Gateway -->|Metrics| Influx
     Influx --> Grafana
+    Broker -->|AMR and asset telemetry| Visualizer
     Client -->|Orders UDP 9091| Coordinator
     Monitor -->|Critical alerts UDP 9090| Gateway
 ```
@@ -51,10 +53,11 @@ flowchart LR
 | Componente | Script Python | Função Principal descrita no Relatório |
 | :--- | :--- | :--- |
 | **Warehouse Gateway** | `src/warehouse_gateway.py` | **Ponte Central e Tradutor**. Normaliza telemetria, traduz protocolos e armazena métricas no InfluxDB. Aloja o servidor de alertas UDP. |
-| **Fleet Coordinator** | `src/fleet_coordinator.py` | Mantém o estado de robôs, prateleiras e estações no Redis, descobre localizações dos ativos e atribui tarefas pelo algoritmo Hungarian. |
+| **Fleet Coordinator** | `src/fleet_coordinator.py` | Mantém o estado de robôs, prateleiras e estações no Redis, descobre localizações, atribui tarefas pelo algoritmo Hungarian e planeia rotas conjuntas com CBS. |
 | **System Monitor** | `src/system_monitor.py` | Analisa telemetria para detetar anomalias e envia alertas com confirmação UDP e fallback MQTT. |
 | **AMR Simulator** | `src/amr_robot.py` | Simula a máquina de estados, bateria, Last Will e falhas estocásticas. |
 | **Smart Infrastructure** | `src/shelves.py`, `src/loading_station.py` | Simula prateleiras e estações de embalamento. |
+| **Live map** | `src/visualizer.py`, `src/web/index.html` | Serve uma planta SVG e recebe telemetria MQTT em direto. |
 
 ---
 
@@ -103,7 +106,7 @@ O Coordenador atribui globalmente tarefas a robôs elegíveis usando o algoritmo
 
 O mapa de demonstração e as coordenadas lógicas estão definidos em `src/task_allocator.py`; não representam uma planta física. O planeador A* evita a célula de obstáculo configurada em `(5, 5)`. Durante a deslocação, o AMR interpola `x`/`y` com aceleração e travagem, executa curvas com atraso (0,8 s para 90° e 1,5 s para 180°) e publica telemetria aproximadamente a cada **100 ms**. A energia de movimento é calculada pela distância percorrida e as curvas têm um custo adicional. A descoberta mantém metadados de localização dos ativos, mas não atualiza dinamicamente a geometria hardcoded usada pelo planeador.
 
-Os AMRs partilham a telemetria por MQTT, incluindo a próxima célula pretendida. Se a célula seguinte estiver ocupada ou reservada por outro robô, o AMR entra em `STALLED_TRAFFIC` e aguarda antes de retomar. Esta é uma coordenação distribuída de demonstração, não um bloqueio transacional central nem um modelo de colisão física. As coordenadas e o estado são guardados no InfluxDB; o dashboard atual não inclui uma planta/mapa 2D.
+O Fleet Coordinator calcula, com Conflict-Based Search (CBS), rotas em espaço-tempo para os robôs atribuídos no mesmo lote. O plano inclui as deslocações à prateleira e à estação, com uma janela conservadora para a operação de recolha; o AMR executa os passos temporizados recebidos por MQTT. Como os tempos da simulação e a entrega de mensagens podem divergir do modelo discreto, a verificação distribuída de célula ocupada continua ativa como proteção e pode ainda produzir `STALLED_TRAFFIC`. O planeador limita-se à grelha de demonstração e aos robôs incluídos no lote, pelo que não é uma garantia de segurança física nem elimina esperas em situações fora do modelo.
 
 ### Deteção de Anomalias (System Monitor)
 O Monitor analisa a telemetria e aciona o Gateway via UDP (Porta 9090) com um comando `FORCE_CHARGE` se:
@@ -123,6 +126,10 @@ O dashboard provisionado, **Warehouse Overview**, inclui:
 * **Station Throughput:** ocupação das estações de embalamento.
 * **Task History** e **System Alerts:** tarefas despachadas e alertas de saúde.
 
+O **Warehouse Control Center** fica disponível em `http://<HOST_IP>:8080` e centraliza a planta SVG/frota em direto e o dashboard Grafana incorporado. O mapa atualiza a cada 300 ms e as métricas a cada 10 segundos. O visualizador subscreve MQTT no servidor, sem expor credenciais ao browser. O host/IP é definido por `HOST_IP` no `.env` (predefinição `127.0.0.1`); as portas externas de MQTT TLS (8883), InfluxDB (8086), Grafana (3000), visualizador (8080) e encomendas UDP (9091) são ligadas a esse endereço. Os containers comunicam entre si pela rede Docker e pelos nomes dos serviços.
+
+Para disponibilizar os serviços numa interface LAN, define `HOST_IP` com o endereço IPv4 dessa interface no `.env` antes de iniciar a stack. O certificado MQTT é regenerado automaticamente com esse IP como SAN e conserva a mesma CA. Redis permanece privado na rede Docker. O Grafana tem acesso anónimo de leitura para permitir a incorporação no painel único; não exponhas o host numa rede não confiável sem restringir o acesso por firewall e rever as credenciais.
+
 ---
 
 ## 🚀 Instruções de Execução
@@ -137,7 +144,7 @@ docker compose up --build --scale amr=4 -d
 docker compose ps
 ```
 
-No PowerShell, copie a configuração com `Copy-Item .env.example .env`. Os valores do `.env.example` são apenas para uma demonstração local; altere todas as palavras-passe e tokens antes de expor serviços ou usar fora da máquina local. Gere também uma chave forte para `UDP_HMAC_SECRET` (por exemplo, `python -c "import secrets; print(secrets.token_hex(32))"`) e coloque-a no `.env`; a mesma chave tem de estar disponível para o Gateway, Coordinator, System Monitor e cliente de encomendas. O ficheiro `.env` está ignorado pelo Git.
+No PowerShell, copie a configuração com `Copy-Item .env.example .env` e ajuste `HOST_IP` no `.env` para o endereço IPv4 da máquina/interface pretendida (mantém `127.0.0.1` para acesso apenas local). Os valores do `.env.example` são apenas para uma demonstração local; altere todas as palavras-passe e tokens antes de expor serviços ou usar fora da máquina local. Gere também uma chave forte para `UDP_HMAC_SECRET` (por exemplo, `python -c "import secrets; print(secrets.token_hex(32))"`) e coloque-a no `.env`; a mesma chave tem de estar disponível para o Gateway, Coordinator, System Monitor e cliente de encomendas. O ficheiro `.env` está ignorado pelo Git.
 
 Um único comando inicia Mosquitto com TLS e autenticação, InfluxDB, Redis, Grafana, Gateway, Coordinator, System Monitor, simuladores de prateleiras/estações e quatro AMRs. Para alterar a dimensão da frota, mude `--scale amr=4`.
 
@@ -147,13 +154,15 @@ Para executar uma simulação local de carga de pedidos, com intervalos, artigos
 bash src/popular_influx.sh
 ```
 
-O simulador estima tempos de deslocação com aceleração e travagem, penaliza curvas, publica coordenadas X/Y a cada 100 ms e usa um planeador A* com uma célula de obstáculo no mapa de demonstração. Os AMRs anunciam a próxima célula e aguardam quando esta está ocupada ou reservada. A bateria é consumida durante movimento/manuseamento e nas curvas, e a estação ajusta o processamento ao tamanho da encomenda. O protocolo de controlo interno usa quatro bytes para transportar também a quantidade pedida.
+O simulador estima tempos de deslocação com aceleração e travagem, penaliza curvas e publica coordenadas X/Y a cada 100 ms. O Coordinator envia trajetórias CBS para as tarefas atribuídas em conjunto; o AMR mantém A* e a verificação de tráfego como fallback. A bateria é consumida durante movimento/manuseamento e nas curvas, e a estação ajusta o processamento ao tamanho da encomenda. O protocolo de controlo interno usa quatro bytes para transportar também a quantidade pedida.
 
 Consulte **Descoberta e gestão de infraestrutura** para os tópicos, intervalos e métodos internos de gestão de prateleiras e estações.
 
-* Grafana: <http://localhost:3000> (credenciais iniciais no `.env`).
-* O broker MQTT TLS fica disponível apenas em `localhost:8883`; a CA local é criada no primeiro arranque e guardada num volume Docker.
-* As encomendas UDP do host são enviadas para `127.0.0.1:9091`:
+* Dashboard único (mapa, frota e métricas): `http://${HOST_IP}:8080`.
+* Grafana para administração: `http://${HOST_IP}:3000` (credenciais iniciais no `.env`).
+* InfluxDB API/UI: `http://${HOST_IP}:8086`.
+* Broker MQTT TLS: `${HOST_IP}:8883`; a CA local fica guardada num volume Docker.
+* As encomendas UDP do host são enviadas para `${HOST_IP}:9091`:
   ```bash
   python src/client_order_injector.py --item item_A --qty 5 --station P1
   ```
@@ -161,7 +170,7 @@ Consulte **Descoberta e gestão de infraestrutura** para os tópicos, intervalos
 
 ### Componentes e persistência
 
-O Coordinator persiste estado de robôs, prateleiras, estações, reservas, encomendas pendentes e ativos removidos no Redis com AOF. O alocador usa o algoritmo Hungarian para minimizar globalmente o tempo de rota estimado; o mapa A* e as coordenadas são uma grelha de demonstração definida em `src/task_allocator.py`, não um mapa físico do armazém.
+O Coordinator persiste estado de robôs, prateleiras, estações, reservas, encomendas pendentes e ativos removidos no Redis com AOF. O alocador usa o algoritmo Hungarian para minimizar globalmente o tempo de rota estimado; CBS planeia em conjunto as rotas do lote, sobre a grelha de demonstração definida em `src/task_allocator.py`, não um mapa físico do armazém.
 
 As mensagens de entrada são validadas com modelos Pydantic. Telemetria e comandos MQTT usam QoS 1; os AMRs publicam Last Will and Testament para sinalizar desconexões. As posições contínuas dos AMRs são campos `x` e `y` da medição `Robots_status` no InfluxDB. Ordens UDP (porta 9091) e alertas UDP/ACK (porta 9090) usam HMAC-SHA256 com `UDP_HMAC_SECRET`, timestamps e nonces; mensagens inválidas, com mais de 30 segundos ou repetidas durante a execução são rejeitadas. A cache anti-replay é em memória e perde-se ao reiniciar o serviço. Alertas críticos continuam a usar repetição e fallback MQTT caso não recebam confirmação. A chave de demonstração incluída no `.env.example` é pública e não serve para proteger uma instalação exposta.
 
