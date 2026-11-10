@@ -1,5 +1,6 @@
 GROUP_ID="2024209219"
 PYTHON_CMD="python3"
+cd "$(dirname "$0")"
 
 # Função para limpar processos ao fechar o script (Ctrl+C)
 cleanup() {

@@ -1,10 +1,13 @@
 import sys
 import time
-import json
 import argparse
+from typing import Any
+
 import paho.mqtt.client as mqtt
 from datetime import datetime, timezone
-from mqqtt_config import MQTT_BROKER, MQTT_PORT
+
+from models import RobotTelemetry, StationTelemetry
+from mqtt_config import MQTT_BROKER, MQTT_PORT, MQTT_QOS, create_mqtt_client
 
 # --- CONFIGURAÇÕES DE SIMULAÇÃO ---
 PROCESSING_TIME = 5.0  # Tempo em segundos para simular o embalamento/carregamento
@@ -15,21 +18,24 @@ class LoadingStation:
     Simula uma Estação de Embalamento/Carregamento (P0, P1, etc.)
     """
 
-    def __init__(self, group_id, station_id, broker_address, broker_port=MQTT_PORT):
+    def __init__(
+        self,
+        group_id: str,
+        station_id: str,
+        broker_address: str = MQTT_BROKER,
+        broker_port: int = MQTT_PORT,
+    ) -> None:
         self.group_id = group_id
         self.station_id = station_id  # Ex: 'P0', 'P1'
         self.broker_address = broker_address
         self.broker_port = broker_port
 
         self.status = "IDLE"
-        self.current_delivery = None  # Informação sobre a entrega a processar
+        self.current_delivery: dict[str, Any] | None = None
         self.state_start_time = time.time()
 
         client_name = f"{group_id}_{station_id}"
-        self.client = mqtt.Client(
-            mqtt.CallbackAPIVersion.VERSION2,
-            client_id=client_name
-        )
+        self.client = create_mqtt_client(client_name)
 
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
@@ -40,42 +46,55 @@ class LoadingStation:
         # Subscreve aos estados dos robôs para saber quando uma entrega chega
         self.topic_sub_amr_status = f"warehouse/{group_id}/amr/+/status"
 
-    def on_connect(self, client, userdata, flags, reason_code, properties):
-        if reason_code == 0:
+    def on_connect(
+        self,
+        client: mqtt.Client,
+        userdata: Any,
+        flags: dict[str, Any],
+        reason_code: Any,
+        properties: Any,
+    ) -> None:
+        if not reason_code.is_failure:
             print(f"✅ Ligado ao Broker MQTT ({self.broker_address}) como {self.station_id}!")
             # 📡 Escuta por qualquer atualização de estado de robô
-            client.subscribe(self.topic_sub_amr_status)
+            client.subscribe(self.topic_sub_amr_status, qos=MQTT_QOS)
             print(f"📡 A escutar: {self.topic_sub_amr_status}")
             self.publish_status()
         else:
             print(f"❌ Falha na ligação, código de retorno: {reason_code}")
 
-    def on_message(self, client, userdata, msg):
+    def on_message(
+        self,
+        client: mqtt.Client,
+        userdata: Any,
+        msg: mqtt.MQTTMessage,
+    ) -> None:
         """
         Processa as mensagens recebidas, principalmente as atualizações de estado dos robôs.
         """
         try:
-            payload = json.loads(msg.payload.decode('utf-8'))
-        except json.JSONDecodeError:
-            return  # Ignora mensagens não-JSON
+            payload = RobotTelemetry.model_validate_json(msg.payload)
+        except ValueError as error:
+            print(f"[{self.station_id}] Rejected robot telemetry: {error}")
+            return
 
         # O ID da localização que o robô reporta (ex: "STATION-P1")
-        robot_loc = payload.get("location_id", "")
+        robot_loc = payload.location_id
         # O ID esperado (ex: "STATION-P1")
         my_loc_tag = f"STATION-{self.station_id}"
 
         # 1. Checa se o robô está a fazer uma entrega na MINHA estação
         if (msg.topic.endswith("/status") and
                 (robot_loc == self.station_id or robot_loc == my_loc_tag) and # <--- CORREÇÃO AQUI
-                payload.get("status") == "DROPPING" and  # O robô está a descarregar
+                payload.status == "DROPPING" and  # O robô está a descarregar
                 self.status == "IDLE"):  # A estação está livre
 
             # Uma entrega está a chegar!
-            print(f"\n📦 Entrega detetada de {payload['robot_id']} em {self.station_id}. A iniciar processamento...")
-            self.current_delivery = payload
+            print(f"\n📦 Entrega detetada de {payload.robot_id} em {self.station_id}. A iniciar processamento...")
+            self.current_delivery = payload.model_dump()
             self.change_state("PROCESSING")
 
-    def change_state(self, new_status):
+    def change_state(self, new_status: str) -> None:
         """Atualiza o estado e publica a alteração."""
         if self.status != new_status:
             self.status = new_status
@@ -83,7 +102,7 @@ class LoadingStation:
             print(f"[{self.station_id}] -> Estado: {self.status}")
             self.publish_status()
 
-    def update_logic(self):
+    def update_logic(self) -> None:
         """Contém a lógica de tempo da estação."""
         elapsed_in_state = time.time() - self.state_start_time
 
@@ -99,7 +118,7 @@ class LoadingStation:
 
         self.publish_status()
 
-    def publish_status(self):
+    def publish_status(self) -> None:
         """Publica o estado atual da estação via MQTT."""
         # Se estiver a processar, indica o tempo restante
         print("A Publicar:")
@@ -107,17 +126,21 @@ class LoadingStation:
         if self.status == "PROCESSING":
             time_remaining = max(0.0, PROCESSING_TIME - (time.time() - self.state_start_time))
 
-        payload = {
-            "station_id": self.station_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "status": self.status,
-            "delivery_info": self.current_delivery,
-            "time_remaining_s": round(time_remaining, 1)
-        }
-        print(payload)
-        self.client.publish(self.topic_pub, json.dumps(payload))
+        payload = StationTelemetry(
+            station_id=self.station_id,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            status=self.status,
+            delivery_info=self.current_delivery,
+            time_remaining_s=round(time_remaining, 1),
+        )
+        self.client.publish(
+            self.topic_pub,
+            payload.model_dump_json(),
+            qos=MQTT_QOS,
+            retain=True,
+        )
 
-    def run(self):
+    def run(self) -> None:
         """Inicia a simulação."""
         self.client.connect(self.broker_address, self.broker_port, 60)
         self.client.loop_start()  # Corre o loop MQTT numa thread separada

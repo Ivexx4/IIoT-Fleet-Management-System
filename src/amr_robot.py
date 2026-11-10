@@ -1,19 +1,31 @@
-import sys
-import time
+import argparse
 import json
 import random
-import struct
-import argparse
+import socket
+import sys
+import time
+from datetime import UTC, datetime
+from typing import Any
+
 import paho.mqtt.client as mqtt
-from datetime import datetime, timezone
-from mqqtt_config import MQTT_BROKER ,MQTT_PORT
+
+from models import RobotTelemetry
+from mqtt_config import GROUP_ID, MQTT_BROKER, MQTT_PORT, MQTT_QOS, create_mqtt_client
+from protocol import decode_command
+
 # --- CONFIGURAÇÕES DE SIMULAÇÃO ---
 STALL_PROBABILITY = 5  # 5% de probabilidade
 BATTERY_DECAY_RATE = 1  # 1% por segundo
 
 
 class AMRRobot:
-    def __init__(self, group_id, robot_id, broker_address, broker_port=MQTT_PORT):
+    def __init__(
+        self,
+        group_id: str,
+        robot_id: str,
+        broker_address: str = MQTT_BROKER,
+        broker_port: int = MQTT_PORT,
+    ) -> None:
         self.group_id = group_id
         self.robot_id = robot_id
         self.broker_address = broker_address
@@ -23,15 +35,19 @@ class AMRRobot:
         self.location_id = "DOCK"
         self.battery = 100.0
 
-        self.target_shelf = None
-        self.target_station = None
+        self.target_shelf: str | None = None
+        self.target_station: str | None = None
 
         self.state_start_time = time.time()
 
         client_name = f"{group_id}_{robot_id}"
-        self.client = mqtt.Client(
-            mqtt.CallbackAPIVersion.VERSION2,
-            client_id=client_name
+        self.client = create_mqtt_client(client_name)
+        self.availability_topic = f"{group_id}/internal/amr/{robot_id}/availability"
+        self.client.will_set(
+            self.availability_topic,
+            json.dumps({"robot_id": robot_id, "status": "offline"}),
+            qos=MQTT_QOS,
+            retain=True,
         )
 
         self.client.on_connect = self.on_connect
@@ -42,7 +58,7 @@ class AMRRobot:
 
         self.last_battery_update = time.time()
 
-    def connect(self):
+    def connect(self) -> None:
         try:
             print(f"[{self.robot_id}] Connecting to Broker at {self.broker_address}...")
             self.client.connect(self.broker_address, self.broker_port, 60)
@@ -52,20 +68,38 @@ class AMRRobot:
             print(f"Connection Failed: {e}")
             sys.exit(1)
 
-    def on_connect(self, client, userdata, flags, rc, properties=None):
-        if rc == 0:
+    def on_connect(
+        self,
+        client: mqtt.Client,
+        userdata: Any,
+        flags: dict[str, Any],
+        reason_code: Any,
+        properties: Any,
+    ) -> None:
+        if not reason_code.is_failure:
             print(f"[{self.robot_id}] Connected! Subscribing to {self.topic_sub}")
-            client.subscribe(self.topic_sub)
+            client.subscribe(self.topic_sub, qos=MQTT_QOS)
+            client.publish(
+                self.availability_topic,
+                json.dumps({"robot_id": self.robot_id, "status": "online"}),
+                qos=MQTT_QOS,
+                retain=True,
+            )
+            self.publish_status()
         else:
-            print(f"[{self.robot_id}] Connection Failed with code {rc}")
+            print(f"[{self.robot_id}] Connection Failed with code {reason_code}")
 
-    def on_message(self, client, userdata, msg):
+    def on_message(
+        self,
+        client: mqtt.Client,
+        userdata: Any,
+        msg: mqtt.MQTTMessage,
+    ) -> None:
         try:
-            if len(msg.payload) != 3:
-                return
-
-            cmd_type, shelf_byte, station_byte = struct.unpack('BBB', msg.payload)
-            print(f"[{self.robot_id}] RX CMD: Type={cmd_type}, Shelf={shelf_byte}, Station={station_byte}")
+            cmd_type, shelf_byte, station_byte = decode_command(msg.payload)
+            print(
+                f"[{self.robot_id}] RX CMD: Type={cmd_type}, Shelf={shelf_byte}, Station={station_byte}"
+            )
 
             # 0x03: FORCE_CHARGE (Override)
             if cmd_type == 0x03:
@@ -87,10 +121,10 @@ class AMRRobot:
                 # CORREÇÃO: Não mudamos location_id aqui. Deixamos o change_state decidir.
                 self.change_state("MOVING_TO_PICK")
 
-        except Exception as e:
-            print(f"Error decoding message: {e}")
+        except ValueError as error:
+            print(f"Rejected command for {self.robot_id}: {error}")
 
-    def change_state(self, new_state):
+    def change_state(self, new_state: str) -> None:
         """
         Gere a transição de estados e verifica falhas (Stall) ANTES de confirmar o movimento.
         """
@@ -115,10 +149,12 @@ class AMRRobot:
                 self.location_id = "TRANSIT"
 
         self.state_start_time = time.time()
-        print(f"[{self.robot_id}] State changed to: {self.status} (Loc: {self.location_id})")
+        print(
+            f"[{self.robot_id}] State changed to: {self.status} (Loc: {self.location_id})"
+        )
         self.publish_status()
 
-    def update_logic(self):
+    def update_logic(self) -> None:
         now = time.time()
         elapsed_in_state = now - self.state_start_time
 
@@ -127,12 +163,19 @@ class AMRRobot:
             return
 
         # --- BATTERY LOGIC ---
-        active_states = ["MOVING_TO_PICK", "PICKING", "MOVING_TO_DROP", "DROPPING", "MOVING_TO_CHARGE"]
+        active_states = [
+            "MOVING_TO_PICK",
+            "PICKING",
+            "MOVING_TO_DROP",
+            "DROPPING",
+            "MOVING_TO_CHARGE",
+        ]
         if self.status in active_states:
             if now - self.last_battery_update >= 1.0:
                 self.battery -= BATTERY_DECAY_RATE
                 self.last_battery_update = now
-                if self.battery < 0: self.battery = 0
+                if self.battery < 0:
+                    self.battery = 0
                 self.publish_status()
         else:
             self.last_battery_update = now
@@ -143,6 +186,8 @@ class AMRRobot:
 
         elif self.status == "MOVING_TO_PICK":
             if elapsed_in_state >= 3.0:
+                if self.target_shelf is None:
+                    return
                 self.location_id = self.target_shelf
                 self.change_state("PICKING")
 
@@ -154,6 +199,8 @@ class AMRRobot:
 
         elif self.status == "MOVING_TO_DROP":
             if elapsed_in_state >= 2.0:
+                if self.target_station is None:
+                    return
                 self.location_id = self.target_station
                 self.change_state("DROPPING")
 
@@ -173,23 +220,29 @@ class AMRRobot:
                 self.location_id = "DOCK"
                 self.change_state("IDLE")
 
-    def publish_status(self):
-        payload = {
-            "robot_id": self.robot_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "location_id": self.location_id,
-            "battery": int(self.battery),
-            "status": self.status
-        }
-        self.client.publish(self.topic_pub, json.dumps(payload))
+    def publish_status(self) -> None:
+        payload = RobotTelemetry(
+            robot_id=self.robot_id,
+            timestamp=datetime.now(UTC).isoformat(),
+            location_id=self.location_id,
+            battery=int(self.battery),
+            status=self.status,
+        )
+        self.client.publish(self.topic_pub, payload.model_dump_json(), qos=MQTT_QOS)
 
-    def run(self):
+    def run(self) -> None:
         self.connect()
         try:
             while True:
                 self.update_logic()
                 time.sleep(0.1)
         except KeyboardInterrupt:
+            self.client.publish(
+                self.availability_topic,
+                json.dumps({"robot_id": self.robot_id, "status": "offline"}),
+                qos=MQTT_QOS,
+                retain=True,
+            )
             self.client.loop_stop()
             self.client.disconnect()
 
@@ -197,7 +250,11 @@ class AMRRobot:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("group_id")
-    parser.add_argument("robot_id")
+    parser.add_argument(
+        "robot_id",
+        nargs="?",
+        default=socket.gethostname(),
+    )
     args = parser.parse_args()
-    bot = AMRRobot(args.group_id, args.robot_id, MQTT_BROKER)
+    bot = AMRRobot(args.group_id or GROUP_ID, args.robot_id, MQTT_BROKER)
     bot.run()

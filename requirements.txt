@@ -1,2 +1,5 @@
-paho-mqtt
-influxdb-client-3
+paho-mqtt==2.1.0
+influxdb-client==1.48.0
+redis==5.2.1
+pydantic==2.12.5
+python-dotenv==1.0.1

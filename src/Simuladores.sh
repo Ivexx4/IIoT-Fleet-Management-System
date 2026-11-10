@@ -1,5 +1,7 @@
 GROUP_ID="2024209219"
 PYTHON_CMD="python3"
+cd "$(dirname "$0")"
+
 pkill -f "amr_robot.py"
 pkill -f "shelves.py"
 pkill -f "loading_station.py"

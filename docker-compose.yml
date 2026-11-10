@@ -1,0 +1,188 @@
+services:
+  mosquitto:
+    build:
+      context: .
+      dockerfile: deploy/mosquitto/Dockerfile
+    environment:
+      MQTT_USERNAME: ${MQTT_USERNAME:-warehouse}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-warehouse-dev-only}
+    ports:
+      - "127.0.0.1:8883:8883"
+    volumes:
+      - mqtt-data:/mosquitto/data
+      - mqtt-certs:/mosquitto/certs
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h localhost -p 8883 --cafile /mosquitto/certs/ca.crt -u \"$${MQTT_USERNAME}\" -P \"$${MQTT_PASSWORD}\" -t '$$SYS/broker/version' -C 1 -W 3 >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  influxdb:
+    image: influxdb:2.7
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_USERNAME:-warehouse}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_PASSWORD:-warehouse-dev-only}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG:-warehouse}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUX_BUCKET:-warehouse_data}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN:-local-dev-token}
+    volumes:
+      - influx-data:/var/lib/influxdb2
+      - influx-config:/etc/influxdb2
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8086/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  gateway:
+    build: .
+    command: ["python", "src/warehouse_gateway.py"]
+    environment: &app-environment
+      WAREHOUSE_GROUP_ID: ${WAREHOUSE_GROUP_ID:-demo}
+      MQTT_BROKER: mosquitto
+      MQTT_PORT: "8883"
+      MQTT_USERNAME: ${MQTT_USERNAME:-warehouse}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-warehouse-dev-only}
+      MQTT_TLS_CA_CERT: /run/mqtt-certs/ca.crt
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_TOKEN: ${INFLUX_TOKEN:-local-dev-token}
+      INFLUX_ORG: ${INFLUX_ORG:-warehouse}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-warehouse_data}
+    volumes:
+      - mqtt-certs:/run/mqtt-certs:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  coordinator:
+    build: .
+    command: ["python", "src/fleet_coordinator.py"]
+    environment:
+      <<: *app-environment
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "127.0.0.1:9091:9091/udp"
+    volumes:
+      - mqtt-certs:/run/mqtt-certs:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  system-monitor:
+    build: .
+    command: ["python", "src/system_monitor.py"]
+    environment:
+      <<: *app-environment
+      GATEWAY_IP: gateway
+      GATEWAY_PORT: "9090"
+    volumes:
+      - mqtt-certs:/run/mqtt-certs:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    restart: unless-stopped
+
+  amr:
+    build: .
+    command: ["python", "src/amr_robot.py", "${WAREHOUSE_GROUP_ID:-demo}"]
+    environment: *app-environment
+    volumes:
+      - mqtt-certs:/run/mqtt-certs:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    restart: unless-stopped
+
+  shelf-a:
+    build: .
+    command: ["python", "src/shelves.py", "${WAREHOUSE_GROUP_ID:-demo}", "storage-a", "S1", "2"]
+    environment: *app-environment
+    volumes:
+      - mqtt-certs:/run/mqtt-certs:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    restart: unless-stopped
+
+  shelf-b:
+    build: .
+    command: ["python", "src/shelves.py", "${WAREHOUSE_GROUP_ID:-demo}", "storage-b", "S6", "2"]
+    environment: *app-environment
+    volumes:
+      - mqtt-certs:/run/mqtt-certs:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    restart: unless-stopped
+
+  station-1:
+    build: .
+    command: ["python", "src/loading_station.py", "${WAREHOUSE_GROUP_ID:-demo}", "P1"]
+    environment: *app-environment
+    volumes:
+      - mqtt-certs:/run/mqtt-certs:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    restart: unless-stopped
+
+  station-2:
+    build: .
+    command: ["python", "src/loading_station.py", "${WAREHOUSE_GROUP_ID:-demo}", "P2"]
+    environment: *app-environment
+    volumes:
+      - mqtt-certs:/run/mqtt-certs:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin-dev-only}
+      INFLUX_ORG: ${INFLUX_ORG:-warehouse}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-warehouse_data}
+      INFLUX_TOKEN: ${INFLUX_TOKEN:-local-dev-token}
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mqtt-data:
+  mqtt-certs:
+  influx-data:
+  influx-config:
+  redis-data:
+  grafana-data:

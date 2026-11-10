@@ -17,11 +17,11 @@ O sistema é composto pelos seguintes módulos principais:
 
 | Componente | Script Python | Função Principal descrita no Relatório |
 | :--- | :--- | :--- |
-| **Warehouse Gateway** | `warehouse_gateway.py` | **Ponte Central e Tradutor**. Realiza a normalização de dados (Semantic Adapter) e a tradução de protocolo (JSON $\to$ Binário). Aloja o Servidor de Alertas UDP (Porta 9090). |
-| **Fleet Coordinator** | `fleet_coordinator.py` | **Cérebro**. Mantém o "World State" em tempo real. Executa a lógica de *Task Allocation* usando um algoritmo heurístico *greedy*. [cite_start]Aloja o Servidor de Encomendas UDP (Porta 9091). |
-| **System Monitor** | `system_monitor.py` | **Tolerância a Falhas**. [cite_start]Analisa a telemetria para detetar anomalias (Stall, Bateria Crítica) e envia comandos de *override* via UDP. |
-| **AMR Simulator** | `amr_robot.py` | Simula a máquina de estados finitos do robô, decaimento de bateria ($1\%/s$) e falhas estocásticas (5% probabilidade de `STALLED`). |
-| **Smart Infrastructure** | `shelves.py`, `loading_station.py` | [cite_start]Ativos estáticos que reagem autonomamente (decremento de stock no `PICKING`, auto-reabastecimento após 2s). |
+| **Warehouse Gateway** | `src/warehouse_gateway.py` | **Ponte Central e Tradutor**. Realiza a normalização de dados (Semantic Adapter) e a tradução de protocolo (JSON $\to$ Binário). Aloja o Servidor de Alertas UDP (Porta 9090). |
+| **Fleet Coordinator** | `src/fleet_coordinator.py` | **Cérebro**. Mantém o "World State" em tempo real. Executa a lógica de *Task Allocation* usando um algoritmo heurístico *greedy*. [cite_start]Aloja o Servidor de Encomendas UDP (Porta 9091). |
+| **System Monitor** | `src/system_monitor.py` | **Tolerância a Falhas**. [cite_start]Analisa a telemetria para detetar anomalias (Stall, Bateria Crítica) e envia comandos de *override* via UDP. |
+| **AMR Simulator** | `src/amr_robot.py` | Simula a máquina de estados finitos do robô, decaimento de bateria ($1\%/s$) e falhas estocásticas (5% probabilidade de `STALLED`). |
+| **Smart Infrastructure** | `src/shelves.py`, `src/loading_station.py` | [cite_start]Ativos estáticos que reagem autonomamente (decremento de stock no `PICKING`, auto-reabastecimento após 2s). |
 
 ---
 
@@ -71,15 +71,11 @@ Os dados são persistidos no **InfluxDB Cloud** e visualizados em dois dashboard
 ### 1. Fleet Overview (Vista Geral)
 [cite_start]Proporciona um resumo de alto nível da operação[cite: 88].
 
-![Fleet Overview](C:\Users\ivoro\OneDrive\Ambiente%20de%20Trabalho\LECD\2º%20Ano\SRSA\projeto\src\README%20IMAGES\Captura%20de%20ecrã%202025-12-09%200229.png)
-
 * **Robot Status:** Tabela com o estado operacional e bateria de todos os AMRs ativos.
 * **Latest Alerts:** Painel crítico ligado ao System Monitor. [cite_start]Regista eventos de alta prioridade (ex: *"Robot Stalled in SHELF-S1 for 0s"*, *"Battery Critical (15.0%)"*) e o tempo decorrido desde a deteção[cite: 91, 92].
 
 ### 2. Detailed Asset Analysis
 [cite_start]Permite a inspeção granular de ativos específicos[cite: 95].
-
-![Detailed Dashboard](C:\Users\ivoro\OneDrive\Ambiente%20de%20Trabalho\LECD\2º%20Ano\SRSA\projeto\src\README%20IMAGES\Captura%20de%20ecrã%202025-12-09%20023313.png)
 
 * **State Timeline:** Visualiza o ciclo de trabalho (duty cycle). [cite_start]O código de cores distingue claramente `MOVING` (Verde), `PICKING`/`IDLE` (Amarelo) e `CHARGING` (Azul), validando a lógica determinística da máquina de estados[cite: 96, 97].
 * [cite_start]**Task History:** Regista os comandos `EXECUTE_TASK` despachados pelo Coordenador[cite: 98].
@@ -92,38 +88,69 @@ Os dados são persistidos no **InfluxDB Cloud** e visualizados em dois dashboard
 
 ### Pré-requisitos
 * **Python 3.8+**
-* **Broker:** Mosquitto (Configurado em `mqqtt_config.py`)
-* **Bibliotecas:** `paho-mqtt`, `influxdb-client-3`
+* **Broker:** Mosquitto
+* **Bibliotecas:** `paho-mqtt`, `influxdb3-python`
+
+### Configuração
+
+O broker MQTT pode ser definido com `MQTT_BROKER` e `MQTT_PORT`. Por omissão, o sistema usa `127.0.0.1:1883`. O identificador do armazém dos serviços centrais pode ser alterado com `WAREHOUSE_GROUP_ID`.
+
+O Gateway precisa de credenciais InfluxDB fornecidas pelo ambiente; não coloque tokens no código nem os envie para o GitHub. Configure `INFLUX_TOKEN` e, se necessário, `INFLUX_URL`, `INFLUX_ORG` e `INFLUX_BUCKET`.
+
+Se já publicou uma versão deste projeto com um token, revogue-o no InfluxDB e crie outro: remover o segredo do código atual não o elimina do histórico Git.
+
+Use o mesmo `WAREHOUSE_GROUP_ID` nos simuladores e serviços centrais; os comandos abaixo usam `demo`.
+
+Exemplo em PowerShell:
+```powershell
+$env:WAREHOUSE_GROUP_ID = "demo"
+$env:MQTT_BROKER = "127.0.0.1"
+$env:MQTT_PORT = "1883"
+$env:INFLUX_TOKEN = "<token-InfluxDB>"
+```
+
+Exemplo em Bash:
+```bash
+export WAREHOUSE_GROUP_ID=demo
+export MQTT_BROKER=127.0.0.1
+export MQTT_PORT=1883
+export INFLUX_TOKEN="<token-InfluxDB>"
+```
+
+Instale as dependências antes de iniciar os serviços:
+```bash
+python -m pip install -r requirements.txt
+```
 
 ### 1. Iniciar Infraestrutura Central
 Abra terminais distintos para cada serviço:
 
 ```bash
 # Gateway (Ponte MQTT/UDP e InfluxDB)
-python3 warehouse_gateway.py
+python src/warehouse_gateway.py
 
 # Coordinator (Gestor de Tarefas e Servidor UDP 9091)
-python3 fleet_coordinator.py
+python src/fleet_coordinator.py
 
 # System Monitor (Monitorização de Saúde e Cliente UDP 9090)
-python3 system_monitor.py
+python src/system_monitor.py
 
 # (Opcional) Debugger de Rede
-python3 mqtt_debugger.py
+python src/mqtt_debugger.py
 ```
 
 ### 2. Iniciar Simuladores de Ativos
 ```bash
 # Simular um Robô (Ex: AMR-1)
-python3 amr_robot.py {GroupID} AMR-1
+python src/amr_robot.py demo AMR-1
 
 # Simular uma Prateleira (Ex: Zona A, S1)
-python3 shelves.py {GroupID} storage-a S1 10
+python src/shelves.py demo storage-a S1 10
 
 # Simular uma Estação
-python3 loading_station.py {GroupID} P1
+python src/loading_station.py demo P1
 ```
 ### 3. Injeção de Encomendas (Cliente) 
 ```bash
-python3 client_order_injector.py --item item_A --qty 5 --station P1
+python src/client_order_injector.py --item item_A --qty 5 --station P1
 ```

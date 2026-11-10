@@ -1,0 +1,17 @@
+apiVersion: 1
+
+datasources:
+  - name: Warehouse InfluxDB
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    uid: warehouse-influxdb
+    isDefault: true
+    editable: false
+    jsonData:
+      version: Flux
+      organization: $INFLUX_ORG
+      defaultBucket: $INFLUX_BUCKET
+      tlsSkipVerify: false
+    secureJsonData:
+      token: $INFLUX_TOKEN
