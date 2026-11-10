@@ -10,7 +10,15 @@ from datetime import datetime
 import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
 from influxdb_client_3 import InfluxDBClient3,Point
-from mqqtt_config import GROUP_ID,MQTT_BROKER,MQTT_PORT
+from mqqtt_config import (
+    GROUP_ID,
+    INFLUX_BUCKET,
+    INFLUX_ORG,
+    INFLUX_TOKEN,
+    INFLUX_URL,
+    MQTT_BROKER,
+    MQTT_PORT,
+)
 
 # ==========================================
 # CONFIGURATION
@@ -19,12 +27,6 @@ from mqqtt_config import GROUP_ID,MQTT_BROKER,MQTT_PORT
 UDP_IP = "0.0.0.0"
 # UDP Configuration (Alert Server)
 UDP_PORT = 9090  # [cite: 177]
-
-# InfluxDB Configuration
-INFLUX_URL = "https://eu-central-1-1.aws.cloud2.influxdata.com"  # Example Cloud URL [cite: 233]
-INFLUX_TOKEN = "PhFvPN7XG9LLbRyFUQynTe6xjCcSpsRHxAivWMqW3KFABdyQjkv_J5Zsn84ekQr8DPCfNzPBa1HOYi0xY1hW4w=="
-INFLUX_ORG = "ivo rosa"
-INFLUX_BUCKET = "warehouse_data"
 
 # Topics
 # Subscribe to all raw sensor topics (Robots + Shelves)
@@ -39,6 +41,12 @@ TOPIC_TASK_DISPATCH = f"{GROUP_ID}/internal/tasks/dispatch"  # [cite: 176]
 
 class WarehouseGateway:
     def __init__(self):
+        if not INFLUX_TOKEN:
+            raise RuntimeError(
+                "INFLUX_TOKEN is required to start the warehouse gateway. "
+                "Set it as an environment variable."
+            )
+
         # Initialize MQTT Client with Paho 2.1 API Version
         self.mqtt_client = mqtt.Client(CallbackAPIVersion.VERSION2)
         self.mqtt_client.on_connect = self.on_connect
