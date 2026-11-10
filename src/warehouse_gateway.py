@@ -25,9 +25,11 @@ from mqtt_config import (
     MQTT_BROKER,
     MQTT_PORT,
     MQTT_QOS,
+    UDP_HMAC_SECRET,
     create_mqtt_client,
 )
 from protocol import encode_command, normalize_stock
+from udp_auth import UdpAuthenticationError, UdpAuthenticator
 
 UDP_HOST = "0.0.0.0"
 UDP_PORT = 9090
@@ -41,6 +43,7 @@ class WarehouseGateway:
     def __init__(self) -> None:
         if not INFLUX_TOKEN:
             raise RuntimeError("INFLUX_TOKEN is required to start the gateway")
+        self.udp_auth = UdpAuthenticator(UDP_HMAC_SECRET)
 
         self.mqtt_client = create_mqtt_client("warehouse-gateway")
         self.mqtt_client.on_connect = self.on_connect
@@ -264,9 +267,14 @@ class WarehouseGateway:
     def run_udp_server(self) -> None:
         while True:
             try:
-                payload, address = self.udp_sock.recvfrom(4_096)
+                datagram, address = self.udp_sock.recvfrom(4_096)
             except OSError:
                 return
+            try:
+                payload = self.udp_auth.open(datagram)
+            except UdpAuthenticationError as error:
+                print(f"Rejected unauthenticated UDP alert from {address}: {error}")
+                continue
             alert_id = ""
             try:
                 alert = HealthAlert.model_validate_json(payload)
@@ -279,7 +287,9 @@ class WarehouseGateway:
                 print(f"Failed to process UDP alert from {address}: {error}")
                 continue
             self.udp_sock.sendto(
-                json.dumps({"alert_id": alert_id, "status": status}).encode("utf-8"),
+                self.udp_auth.seal(
+                    json.dumps({"alert_id": alert_id, "status": status}).encode("utf-8")
+                ),
                 address,
             )
 

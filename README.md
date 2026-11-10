@@ -137,7 +137,7 @@ docker compose up --build --scale amr=4 -d
 docker compose ps
 ```
 
-No PowerShell, copie a configuração com `Copy-Item .env.example .env`. Os valores do `.env.example` são apenas para uma demonstração local; altere todas as palavras-passe e tokens antes de expor serviços ou usar fora da máquina local. O ficheiro `.env` está ignorado pelo Git.
+No PowerShell, copie a configuração com `Copy-Item .env.example .env`. Os valores do `.env.example` são apenas para uma demonstração local; altere todas as palavras-passe e tokens antes de expor serviços ou usar fora da máquina local. Gere também uma chave forte para `UDP_HMAC_SECRET` (por exemplo, `python -c "import secrets; print(secrets.token_hex(32))"`) e coloque-a no `.env`; a mesma chave tem de estar disponível para o Gateway, Coordinator, System Monitor e cliente de encomendas. O ficheiro `.env` está ignorado pelo Git.
 
 Um único comando inicia Mosquitto com TLS e autenticação, InfluxDB, Redis, Grafana, Gateway, Coordinator, System Monitor, simuladores de prateleiras/estações e quatro AMRs. Para alterar a dimensão da frota, mude `--scale amr=4`.
 
@@ -163,7 +163,7 @@ Consulte **Descoberta e gestão de infraestrutura** para os tópicos, intervalos
 
 O Coordinator persiste estado de robôs, prateleiras, estações, reservas, encomendas pendentes e ativos removidos no Redis com AOF. O alocador usa o algoritmo Hungarian para minimizar globalmente o tempo de rota estimado; o mapa A* e as coordenadas são uma grelha de demonstração definida em `src/task_allocator.py`, não um mapa físico do armazém.
 
-As mensagens de entrada são validadas com modelos Pydantic. Telemetria e comandos MQTT usam QoS 1; os AMRs publicam Last Will and Testament para sinalizar desconexões. As posições contínuas dos AMRs são campos `x` e `y` da medição `Robots_status` no InfluxDB. Alertas críticos usam UDP com ACK e repetição, e recorrem a MQTT QoS 1 caso não recebam confirmação.
+As mensagens de entrada são validadas com modelos Pydantic. Telemetria e comandos MQTT usam QoS 1; os AMRs publicam Last Will and Testament para sinalizar desconexões. As posições contínuas dos AMRs são campos `x` e `y` da medição `Robots_status` no InfluxDB. Ordens UDP (porta 9091) e alertas UDP/ACK (porta 9090) usam HMAC-SHA256 com `UDP_HMAC_SECRET`, timestamps e nonces; mensagens inválidas, com mais de 30 segundos ou repetidas durante a execução são rejeitadas. A cache anti-replay é em memória e perde-se ao reiniciar o serviço. Alertas críticos continuam a usar repetição e fallback MQTT caso não recebam confirmação. A chave de demonstração incluída no `.env.example` é pública e não serve para proteger uma instalação exposta.
 
 ### Desenvolvimento e validação
 

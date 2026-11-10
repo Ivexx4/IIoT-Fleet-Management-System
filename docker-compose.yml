@@ -1,3 +1,15 @@
+x-app-environment: &app-environment
+  WAREHOUSE_GROUP_ID: ${WAREHOUSE_GROUP_ID:-demo}
+  MQTT_BROKER: mosquitto
+  MQTT_PORT: "8883"
+  MQTT_USERNAME: ${MQTT_USERNAME:-warehouse}
+  MQTT_PASSWORD: ${MQTT_PASSWORD:-warehouse-dev-only}
+  MQTT_TLS_CA_CERT: /run/mqtt-certs/ca.crt
+  INFLUX_URL: http://influxdb:8086
+  INFLUX_TOKEN: ${INFLUX_TOKEN:-local-dev-token}
+  INFLUX_ORG: ${INFLUX_ORG:-warehouse}
+  INFLUX_BUCKET: ${INFLUX_BUCKET:-warehouse_data}
+
 services:
   mosquitto:
     build:
@@ -54,17 +66,9 @@ services:
   gateway:
     build: .
     command: ["python", "src/warehouse_gateway.py"]
-    environment: &app-environment
-      WAREHOUSE_GROUP_ID: ${WAREHOUSE_GROUP_ID:-demo}
-      MQTT_BROKER: mosquitto
-      MQTT_PORT: "8883"
-      MQTT_USERNAME: ${MQTT_USERNAME:-warehouse}
-      MQTT_PASSWORD: ${MQTT_PASSWORD:-warehouse-dev-only}
-      MQTT_TLS_CA_CERT: /run/mqtt-certs/ca.crt
-      INFLUX_URL: http://influxdb:8086
-      INFLUX_TOKEN: ${INFLUX_TOKEN:-local-dev-token}
-      INFLUX_ORG: ${INFLUX_ORG:-warehouse}
-      INFLUX_BUCKET: ${INFLUX_BUCKET:-warehouse_data}
+    environment:
+      <<: *app-environment
+      UDP_HMAC_SECRET: ${UDP_HMAC_SECRET:-local-demo-hmac-secret-change-before-deploy-0123456789}
     volumes:
       - mqtt-certs:/run/mqtt-certs:ro
     depends_on:
@@ -80,6 +84,7 @@ services:
     environment:
       <<: *app-environment
       REDIS_URL: redis://redis:6379/0
+      UDP_HMAC_SECRET: ${UDP_HMAC_SECRET:-local-demo-hmac-secret-change-before-deploy-0123456789}
     ports:
       - "127.0.0.1:9091:9091/udp"
     volumes:
@@ -98,6 +103,7 @@ services:
       <<: *app-environment
       GATEWAY_IP: gateway
       GATEWAY_PORT: "9090"
+      UDP_HMAC_SECRET: ${UDP_HMAC_SECRET:-local-demo-hmac-secret-change-before-deploy-0123456789}
     volumes:
       - mqtt-certs:/run/mqtt-certs:ro
     depends_on:

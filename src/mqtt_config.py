@@ -12,6 +12,7 @@ MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 MQTT_USERNAME = os.getenv("MQTT_USERNAME")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
 MQTT_TLS_CA_CERT = os.getenv("MQTT_TLS_CA_CERT")
+UDP_HMAC_SECRET = os.getenv("UDP_HMAC_SECRET", "")
 MQTT_QOS = 1
 
 INFLUX_URL = os.getenv("INFLUX_URL", "http://127.0.0.1:8086")

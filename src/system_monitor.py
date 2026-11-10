@@ -14,8 +14,10 @@ from mqtt_config import (
     MQTT_BROKER,
     MQTT_PORT,
     MQTT_QOS,
+    UDP_HMAC_SECRET,
     create_mqtt_client,
 )
+from udp_auth import UdpAuthenticationError, UdpAuthenticator
 
 GATEWAY_IP = os.getenv("GATEWAY_IP", "127.0.0.1")
 GATEWAY_PORT = int(os.getenv("GATEWAY_PORT", "9090"))
@@ -35,6 +37,7 @@ class RobotHealth:
 
 class SystemMonitor:
     def __init__(self) -> None:
+        self.udp_auth = UdpAuthenticator(UDP_HMAC_SECRET)
         self.robots: dict[str, RobotHealth] = {}
         self.lock = threading.Lock()
         self.client = create_mqtt_client("system-monitor")
@@ -132,7 +135,10 @@ class SystemMonitor:
         payload = alert.model_dump_json().encode("utf-8")
         for _ in range(3):
             try:
-                self.udp_sock.sendto(payload, (GATEWAY_IP, GATEWAY_PORT))
+                self.udp_sock.sendto(
+                    self.udp_auth.seal(payload),
+                    (GATEWAY_IP, GATEWAY_PORT),
+                )
                 response, _ = self.udp_sock.recvfrom(1024)
             except TimeoutError:
                 continue
@@ -140,8 +146,9 @@ class SystemMonitor:
                 print(f"UDP delivery failed for {alert.alert_id}: {error}")
                 break
             try:
-                ack = UdpAck.model_validate_json(response)
-            except ValidationError as error:
+                ack_payload = self.udp_auth.open(response)
+                ack = UdpAck.model_validate_json(ack_payload)
+            except (UdpAuthenticationError, ValidationError) as error:
                 print(f"Invalid UDP ACK for alert {alert.alert_id}: {error}")
                 continue
             if ack.alert_id == alert.alert_id and ack.status in {

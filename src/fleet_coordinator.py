@@ -23,9 +23,11 @@ from mqtt_config import (
     MQTT_PORT,
     MQTT_QOS,
     REDIS_URL,
+    UDP_HMAC_SECRET,
     create_mqtt_client,
 )
 from task_allocator import minimum_cost_assignment, route_cost
+from udp_auth import UdpAuthenticationError, UdpAuthenticator
 
 UDP_HOST = "0.0.0.0"
 UDP_PORT_ORDERS = 9091
@@ -83,6 +85,7 @@ class RedisState(Protocol):
 
 class FleetCoordinator:
     def __init__(self) -> None:
+        self.udp_auth = UdpAuthenticator(UDP_HMAC_SECRET)
         self.redis: RedisState = cast(
             RedisState,
             Redis.from_url(REDIS_URL, decode_responses=True),
@@ -376,9 +379,14 @@ class FleetCoordinator:
     def run_udp_server(self) -> None:
         while True:
             try:
-                payload, address = self.udp_sock.recvfrom(4_096)
+                datagram, address = self.udp_sock.recvfrom(4_096)
             except OSError:
                 return
+            try:
+                payload = self.udp_auth.open(datagram)
+            except UdpAuthenticationError as error:
+                print(f"Rejected unauthenticated UDP order from {address}: {error}")
+                continue
             try:
                 order = Order.model_validate_json(payload)
                 order_id = order.order_id or uuid4().hex
@@ -395,7 +403,10 @@ class FleetCoordinator:
                     json.dumps(order_record),
                 )
                 response = {"order_id": order_id, "status": "accepted"}
-                self.udp_sock.sendto(json.dumps(response).encode("utf-8"), address)
+                self.udp_sock.sendto(
+                    self.udp_auth.seal(json.dumps(response).encode("utf-8")),
+                    address,
+                )
                 print(f"Queued order {order_id}: {order.item} x{order.quantity}")
             except (ValidationError, json.JSONDecodeError) as error:
                 print(f"Rejected UDP order from {address}: {error}")

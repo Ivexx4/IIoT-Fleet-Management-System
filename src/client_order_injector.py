@@ -4,6 +4,8 @@ import socket
 from uuid import uuid4
 
 from models import Order
+from mqtt_config import UDP_HMAC_SECRET
+from udp_auth import UdpAuthenticator
 
 
 def send_order(
@@ -13,18 +15,19 @@ def send_order(
     host: str = "127.0.0.1",
     port: int = 9091,
 ) -> None:
+    udp_auth = UdpAuthenticator(UDP_HMAC_SECRET)
     order = Order(
         order_id=uuid4().hex,
         item=item,
         quantity=quantity,
         pack_station=station,
     )
-    message = order.model_dump_json(exclude_none=True).encode("utf-8")
+    payload = order.model_dump_json(exclude_none=True).encode("utf-8")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(1.0)
     try:
         for attempt in range(3):
-            sock.sendto(message, (host, port))
+            sock.sendto(udp_auth.seal(payload), (host, port))
             try:
                 response, _ = sock.recvfrom(1024)
             except TimeoutError as error:
@@ -33,7 +36,8 @@ def send_order(
                         "Coordinator did not acknowledge the order"
                     ) from error
                 continue
-            result = json.loads(response.decode("utf-8"))
+            response_payload = udp_auth.open(response)
+            result = json.loads(response_payload.decode("utf-8"))
             if (
                 result.get("order_id") == order.order_id
                 and result.get("status") == "accepted"
