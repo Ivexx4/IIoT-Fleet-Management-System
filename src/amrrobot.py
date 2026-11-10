@@ -98,7 +98,8 @@ class AMRRobot:
         try:
             cmd_type, shelf_byte, station_byte = decode_command(msg.payload)
             print(
-                f"[{self.robot_id}] RX CMD: Type={cmd_type}, Shelf={shelf_byte}, Station={station_byte}"
+                f"[{self.robot_id}] RX CMD: Type={cmd_type}, "
+                f"Shelf={shelf_byte}, Station={station_byte}"
             )
 
             # 0x03: FORCE_CHARGE (Override)
@@ -118,7 +119,7 @@ class AMRRobot:
                 self.target_shelf = f"SHELF-S{shelf_byte}"
                 self.target_station = f"STATION-P{station_byte}"
 
-                # CORREÇÃO: Não mudamos location_id aqui. Deixamos o change_state decidir.
+                # Deixa change_state controlar a transição de localização.
                 self.change_state("MOVING_TO_PICK")
 
         except ValueError as error:
@@ -126,7 +127,7 @@ class AMRRobot:
 
     def change_state(self, new_state: str) -> None:
         """
-        Gere a transição de estados e verifica falhas (Stall) ANTES de confirmar o movimento.
+        Aplica a falha aleatória antes de confirmar o movimento.
         """
         # Variável temporária para saber se falhou
         stalled = False
@@ -140,17 +141,17 @@ class AMRRobot:
         # --- APLICAÇÃO DO ESTADO ---
         if stalled:
             self.status = "STALLED"
-            # IMPORTANTE: Se estagnou, NÃO muda location_id para TRANSIT.
-            # Mantém a localização anterior (DOCK ou SHELF).
+            # Preserva a última posição conhecida se o robô estagnar.
         else:
             self.status = new_state
-            # Se o novo estado é de movimento e não falhou, então sim, estamos em trânsito
+            # Só altera a localização quando o movimento foi iniciado.
             if new_state in ["MOVING_TO_PICK", "MOVING_TO_DROP"]:
                 self.location_id = "TRANSIT"
 
         self.state_start_time = time.time()
         print(
-            f"[{self.robot_id}] State changed to: {self.status} (Loc: {self.location_id})"
+            f"[{self.robot_id}] State changed to: {self.status} "
+            f"(Loc: {self.location_id})"
         )
         self.publish_status()
 
@@ -228,7 +229,12 @@ class AMRRobot:
             battery=int(self.battery),
             status=self.status,
         )
-        self.client.publish(self.topic_pub, payload.model_dump_json(), qos=MQTT_QOS)
+        self.client.publish(
+            self.topic_pub,
+            payload.model_dump_json(),
+            qos=MQTT_QOS,
+            retain=True,
+        )
 
     def run(self) -> None:
         self.connect()

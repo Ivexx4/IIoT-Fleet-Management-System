@@ -1,4 +1,3 @@
-import json
 import os
 import socket
 import threading
@@ -107,7 +106,10 @@ class SystemMonitor:
                 "MOVING_TO_CHARGE",
             }:
                 alert_message = f"Battery Critical ({data.battery:.1f}%)"
-            elif data.status == "STALLED" and now - health.last_move_time >= STALL_TIMEOUT:
+            elif (
+                data.status == "STALLED"
+                and now - health.last_move_time >= STALL_TIMEOUT
+            ):
                 alert_message = (
                     f"Robot Stalled in {data.location_id} for "
                     f"{int(now - health.last_move_time)}s"
@@ -120,29 +122,37 @@ class SystemMonitor:
                 message=alert_message,
                 override_task="FORCE_CHARGE",
             )
-            self.send_alert(alert)
-            with self.lock:
-                current = self.robots.get(robot_id)
-                if current is not None:
-                    current.last_alert = now
+            if self.send_alert(alert):
+                with self.lock:
+                    current = self.robots.get(robot_id)
+                    if current is not None:
+                        current.last_alert = now
 
-    def send_alert(self, alert: HealthAlert) -> None:
+    def send_alert(self, alert: HealthAlert) -> bool:
         payload = alert.model_dump_json().encode("utf-8")
-        try:
-            for _ in range(3):
+        for _ in range(3):
+            try:
                 self.udp_sock.sendto(payload, (GATEWAY_IP, GATEWAY_PORT))
-                try:
-                    response, _ = self.udp_sock.recvfrom(1024)
-                except socket.timeout:
-                    continue
+                response, _ = self.udp_sock.recvfrom(1024)
+            except TimeoutError:
+                continue
+            except OSError as error:
+                print(f"UDP delivery failed for {alert.alert_id}: {error}")
+                break
+            try:
                 ack = UdpAck.model_validate_json(response)
-                if ack.alert_id == alert.alert_id and ack.status in {
-                    "accepted",
-                    "duplicate",
-                }:
-                    print(f"Gateway acknowledged alert {alert.alert_id}")
-                    return
-            print(f"No UDP ACK for {alert.alert_id}; publishing MQTT fallback")
+            except ValidationError as error:
+                print(f"Invalid UDP ACK for alert {alert.alert_id}: {error}")
+                continue
+            if ack.alert_id == alert.alert_id and ack.status in {
+                "accepted",
+                "duplicate",
+            }:
+                print(f"Gateway acknowledged alert {alert.alert_id}")
+                return True
+
+        print(f"No UDP ACK for {alert.alert_id}; publishing MQTT fallback")
+        try:
             result = self.client.publish(
                 TOPIC_ALERT_FALLBACK,
                 payload,
@@ -151,8 +161,10 @@ class SystemMonitor:
             if result.rc != mqtt.MQTT_ERR_SUCCESS:
                 raise RuntimeError("MQTT rejected the critical alert fallback")
             result.wait_for_publish(timeout=5)
-        except (OSError, ValidationError, ValueError) as error:
+            return True
+        except (OSError, RuntimeError) as error:
             print(f"Failed to deliver critical alert {alert.alert_id}: {error}")
+            return False
 
 
 if __name__ == "__main__":

@@ -20,7 +20,9 @@ def _asset_number(value: str | int, prefix: str) -> int:
     return number
 
 
-def encode_command(command: str, shelf_id: str | int = 0, station_id: str | int = 0) -> bytes:
+def encode_command(
+    command: str, shelf_id: str | int = 0, station_id: str | int = 0
+) -> bytes:
     if command == "FORCE_CHARGE":
         return struct.pack(COMMAND_FORMAT, FORCE_CHARGE, 0, 0)
     if command != "EXECUTE_TASK":

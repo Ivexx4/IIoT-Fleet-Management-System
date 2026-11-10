@@ -118,7 +118,12 @@ class WarehouseGateway:
                 self.process_alert(HealthAlert.model_validate_json(payload))
             elif message.topic.startswith(f"warehouse/{GROUP_ID}/"):
                 self.process_sensor_data(message.topic, payload)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError) as error:
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            ValidationError,
+            ValueError,
+        ) as error:
             print(f"Rejected MQTT message on {message.topic}: {error}")
         except Exception as error:
             print(f"Failed to process MQTT message on {message.topic}: {error}")
@@ -127,7 +132,11 @@ class WarehouseGateway:
         data = json.loads(payload)
         topic_parts = topic.split("/")
 
-        if len(topic_parts) >= 5 and topic_parts[2] == "amr" and topic_parts[-1] == "status":
+        if (
+            len(topic_parts) >= 5
+            and topic_parts[2] == "amr"
+            and topic_parts[-1] == "status"
+        ):
             telemetry = RobotTelemetry.model_validate(data)
             point = (
                 Point("Robots_status")
@@ -145,12 +154,12 @@ class WarehouseGateway:
             return
 
         if len(topic_parts) >= 6 and topic_parts[2] == "locations":
-            telemetry = ShelfTelemetry.model_validate(data)
+            shelf_telemetry = ShelfTelemetry.model_validate(data)
             stock_units, normalized_unit = normalize_stock(
                 topic_parts[3],
-                telemetry.stock,
+                shelf_telemetry.stock,
             )
-            normalized = telemetry.model_copy(
+            normalized = shelf_telemetry.model_copy(
                 update={
                     "stock_units": stock_units,
                     "unit": normalized_unit,
@@ -158,32 +167,32 @@ class WarehouseGateway:
             )
             point = (
                 Point("Shelves")
-                .tag("asset_id", telemetry.asset_id)
+                .tag("asset_id", shelf_telemetry.asset_id)
                 .field("stock", stock_units)
             )
             self.write_api.write(bucket=INFLUX_BUCKET, record=point)
             self.mqtt_client.publish(
-                f"{GROUP_ID}/internal/static/{telemetry.asset_id}/status",
+                f"{GROUP_ID}/internal/static/{shelf_telemetry.asset_id}/status",
                 normalized.model_dump_json(by_alias=True),
                 qos=MQTT_QOS,
             )
             return
 
         if len(topic_parts) >= 5 and topic_parts[2] == "station":
-            telemetry = StationTelemetry.model_validate(data)
+            station_telemetry = StationTelemetry.model_validate(data)
             point = (
                 Point("Stations")
-                .tag("station_id", telemetry.station_id)
-                .field("status", telemetry.status)
+                .tag("station_id", station_telemetry.station_id)
+                .field("status", station_telemetry.status)
                 .field(
                     "is_busy",
-                    int(telemetry.status == "PROCESSING"),
+                    int(station_telemetry.status == "PROCESSING"),
                 )
             )
             self.write_api.write(bucket=INFLUX_BUCKET, record=point)
             self.mqtt_client.publish(
-                f"{GROUP_ID}/internal/station/{telemetry.station_id}/status",
-                telemetry.model_dump_json(),
+                f"{GROUP_ID}/internal/station/{station_telemetry.station_id}/status",
+                station_telemetry.model_dump_json(),
                 qos=MQTT_QOS,
             )
 

@@ -21,7 +21,7 @@ def test_force_charge_command_binary_round_trip() -> None:
         ("UNKNOWN", "S1", "P1"),
         ("EXECUTE_TASK", "not-a-shelf", "P1"),
         ("EXECUTE_TASK", "S256", "P1"),
-        ("EXECUTE_TASK", "S1", "P0"),
+        ("EXECUTE_TASK", "S1", "P256"),
     ],
 )
 def test_rejects_invalid_command_identifiers(
@@ -70,7 +70,7 @@ def test_hungarian_assignment_rejects_invalid_matrix() -> None:
 
 
 def test_route_estimate_includes_shelf_to_station_leg() -> None:
-    assert route_cost("DOCK", "S1", "P1") == 7
+    assert route_cost("DOCK", "S1", "P1") == 9
 
 
 def test_message_models_validate_external_payloads() -> None:

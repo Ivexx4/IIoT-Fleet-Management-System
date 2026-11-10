@@ -40,7 +40,7 @@
             "type": "influxdb",
             "uid": "warehouse-influxdb"
           },
-          "query": "from(bucket: \"warehouse_data\") |> range(start: -1h) |> filter(fn: (r) => r._measurement == \"Robots_status\" and r._field == \"battery\") |> aggregateWindow(every: 10s, fn: last, createEmpty: false)",
+          "query": "from(bucket: v.defaultBucket) |> range(start: -1h) |> filter(fn: (r) => r._measurement == \"Robots_status\" and r._field == \"battery\") |> aggregateWindow(every: 10s, fn: last, createEmpty: false)",
           "refId": "A"
         }
       ],
@@ -77,7 +77,7 @@
             "type": "influxdb",
             "uid": "warehouse-influxdb"
           },
-          "query": "from(bucket: \"warehouse_data\") |> range(start: -1h) |> filter(fn: (r) => r._measurement == \"Shelves\" and r._field == \"stock\") |> aggregateWindow(every: 10s, fn: last, createEmpty: false)",
+          "query": "from(bucket: v.defaultBucket) |> range(start: -1h) |> filter(fn: (r) => r._measurement == \"Shelves\" and r._field == \"stock\") |> aggregateWindow(every: 10s, fn: last, createEmpty: false)",
           "refId": "A"
         }
       ],

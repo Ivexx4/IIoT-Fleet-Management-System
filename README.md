@@ -20,7 +20,7 @@ O sistema é composto pelos seguintes módulos principais:
 | **Warehouse Gateway** | `warehouse_gateway.py` | **Ponte Central e Tradutor**. Realiza a normalização de dados (Semantic Adapter) e a tradução de protocolo (JSON $\to$ Binário). Aloja o Servidor de Alertas UDP (Porta 9090). |
 | **Fleet Coordinator** | `fleet_coordinator.py` | **Cérebro**. Mantém o "World State" em tempo real. Executa a lógica de *Task Allocation* usando um algoritmo heurístico *greedy*. [cite_start]Aloja o Servidor de Encomendas UDP (Porta 9091). |
 | **System Monitor** | `system_monitor.py` | **Tolerância a Falhas**. [cite_start]Analisa a telemetria para detetar anomalias (Stall, Bateria Crítica) e envia comandos de *override* via UDP. |
-| **AMR Simulator** | `amr_robot.py` | Simula a máquina de estados finitos do robô, decaimento de bateria ($1\%/s$) e falhas estocásticas (5% probabilidade de `STALLED`). |
+| **AMR Simulator** | `amrrobot.py` | Simula a máquina de estados finitos do robô, decaimento de bateria ($1\%/s$) e falhas estocásticas (5% probabilidade de `STALLED`). |
 | **Smart Infrastructure** | `shelves.py`, `loading_station.py` | [cite_start]Ativos estáticos que reagem autonomamente (decremento de stock no `PICKING`, auto-reabastecimento após 2s). |
 
 ---

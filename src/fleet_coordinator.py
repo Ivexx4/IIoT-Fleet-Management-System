@@ -2,7 +2,7 @@ import json
 import socket
 import threading
 import time
-from typing import Any
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 import paho.mqtt.client as mqtt
@@ -31,9 +31,36 @@ REDIS_RESERVED_ROBOTS = "warehouse:reserved-robots"
 REDIS_ORDER_IDS = "warehouse:order-ids"
 
 
+class RedisState(Protocol):
+    def close(self) -> None: ...
+
+    def hget(self, name: str, key: str) -> str | None: ...
+
+    def hgetall(self, name: str) -> dict[str, str]: ...
+
+    def hset(self, name: str, key: str, value: str) -> int: ...
+
+    def lrange(self, name: str, start: int, end: int) -> list[str]: ...
+
+    def lrem(self, name: str, count: int, value: str) -> int: ...
+
+    def ping(self) -> Any: ...
+
+    def rpush(self, name: str, *values: str) -> int: ...
+
+    def sadd(self, name: str, *values: str) -> int: ...
+
+    def srem(self, name: str, *values: str) -> int: ...
+
+    def smembers(self, name: str) -> set[str]: ...
+
+
 class FleetCoordinator:
     def __init__(self) -> None:
-        self.redis: Redis[str] = Redis.from_url(REDIS_URL, decode_responses=True)
+        self.redis: RedisState = cast(
+            RedisState,
+            Redis.from_url(REDIS_URL, decode_responses=True),
+        )
         self.redis.ping()
         self.client = create_mqtt_client("fleet-coordinator")
         self.client.on_connect = self.on_connect
@@ -84,8 +111,6 @@ class FleetCoordinator:
         try:
             topic_parts = message.topic.split("/")
             payload = json.loads(message.payload.decode("utf-8"))
-            if len(topic_parts) >= 5 and topic_parts[2:4] == ["amr", ""]:
-                return
             if len(topic_parts) >= 5 and topic_parts[2] == "amr":
                 robot_id = payload.get("robot_id")
                 if topic_parts[-1] == "availability":
@@ -257,8 +282,7 @@ class FleetCoordinator:
                 self.redis.sadd(REDIS_RESERVED_ROBOTS, robot_id)
                 self.redis.lrem(REDIS_PENDING_ORDERS, 1, raw_order)
             print(
-                f"Assigned order {order_data['order_id']} "
-                f"({order.item}) to {robot_id}"
+                f"Assigned order {order_data['order_id']} ({order.item}) to {robot_id}"
             )
 
 

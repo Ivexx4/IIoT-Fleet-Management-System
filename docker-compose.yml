@@ -12,7 +12,7 @@ services:
       - mqtt-data:/mosquitto/data
       - mqtt-certs:/mosquitto/certs
     healthcheck:
-      test: ["CMD-SHELL", "mosquitto_sub -h localhost -p 8883 --cafile /mosquitto/certs/ca.crt -u \"$${MQTT_USERNAME}\" -P \"$${MQTT_PASSWORD}\" -t '$$SYS/broker/version' -C 1 -W 3 >/dev/null"]
+      test: ["CMD-SHELL", "mosquitto_pub -h localhost -p 8883 --cafile /mosquitto/certs/ca.crt -u \"$${MQTT_USERNAME}\" -P \"$${MQTT_PASSWORD}\" -q 1 -t healthcheck -n"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -107,7 +107,7 @@ services:
 
   amr:
     build: .
-    command: ["python", "src/amr_robot.py", "${WAREHOUSE_GROUP_ID:-demo}"]
+    command: ["python", "src/amrrobot.py", "${WAREHOUSE_GROUP_ID:-demo}"]
     environment: *app-environment
     volumes:
       - mqtt-certs:/run/mqtt-certs:ro

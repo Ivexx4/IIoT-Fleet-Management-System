@@ -1,10 +1,9 @@
-import sys
-import time
 import argparse
+import time
+from datetime import UTC, datetime
 from typing import Any
 
 import paho.mqtt.client as mqtt
-from datetime import datetime, timezone
 
 from models import RobotTelemetry, StationTelemetry
 from mqtt_config import MQTT_BROKER, MQTT_PORT, MQTT_QOS, create_mqtt_client
@@ -55,7 +54,10 @@ class LoadingStation:
         properties: Any,
     ) -> None:
         if not reason_code.is_failure:
-            print(f"✅ Ligado ao Broker MQTT ({self.broker_address}) como {self.station_id}!")
+            print(
+                f"✅ Ligado ao Broker MQTT ({self.broker_address}) "
+                f"como {self.station_id}!"
+            )
             # 📡 Escuta por qualquer atualização de estado de robô
             client.subscribe(self.topic_sub_amr_status, qos=MQTT_QOS)
             print(f"📡 A escutar: {self.topic_sub_amr_status}")
@@ -70,7 +72,7 @@ class LoadingStation:
         msg: mqtt.MQTTMessage,
     ) -> None:
         """
-        Processa as mensagens recebidas, principalmente as atualizações de estado dos robôs.
+        Processa as atualizações de estado recebidas dos robôs.
         """
         try:
             payload = RobotTelemetry.model_validate_json(msg.payload)
@@ -84,13 +86,19 @@ class LoadingStation:
         my_loc_tag = f"STATION-{self.station_id}"
 
         # 1. Checa se o robô está a fazer uma entrega na MINHA estação
-        if (msg.topic.endswith("/status") and
-                (robot_loc == self.station_id or robot_loc == my_loc_tag) and # <--- CORREÇÃO AQUI
-                payload.status == "DROPPING" and  # O robô está a descarregar
-                self.status == "IDLE"):  # A estação está livre
-
+        if (
+            msg.topic.endswith("/status")
+            and (
+                robot_loc == self.station_id or robot_loc == my_loc_tag
+            )  # <--- CORREÇÃO AQUI
+            and payload.status == "DROPPING"  # O robô está a descarregar
+            and self.status == "IDLE"
+        ):  # A estação está livre
             # Uma entrega está a chegar!
-            print(f"\n📦 Entrega detetada de {payload.robot_id} em {self.station_id}. A iniciar processamento...")
+            print(
+                f"\n📦 Entrega de {payload.robot_id} detetada "
+                f"em {self.station_id}; a processar..."
+            )
             self.current_delivery = payload.model_dump()
             self.change_state("PROCESSING")
 
@@ -108,7 +116,7 @@ class LoadingStation:
 
         if self.status == "PROCESSING":
             if elapsed_in_state >= PROCESSING_TIME:
-                print(f"📦 Pedido concluído e embalado! Estação {self.station_id} agora livre.")
+                print(f"📦 Pedido concluído! Estação {self.station_id} livre.")
                 self.current_delivery = None
                 self.change_state("IDLE")
 
@@ -122,13 +130,15 @@ class LoadingStation:
         """Publica o estado atual da estação via MQTT."""
         # Se estiver a processar, indica o tempo restante
         print("A Publicar:")
-        time_remaining = 0
+        time_remaining = 0.0
         if self.status == "PROCESSING":
-            time_remaining = max(0.0, PROCESSING_TIME - (time.time() - self.state_start_time))
+            time_remaining = max(
+                0.0, PROCESSING_TIME - (time.time() - self.state_start_time)
+            )
 
         payload = StationTelemetry(
             station_id=self.station_id,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             status=self.status,
             delivery_info=self.current_delivery,
             time_remaining_s=round(time_remaining, 1),
@@ -156,7 +166,9 @@ class LoadingStation:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Simulador de Estação de Embalamento/Carregamento")
+    parser = argparse.ArgumentParser(
+        description="Simulador de Estação de Embalamento/Carregamento"
+    )
     parser.add_argument("group_id")
     parser.add_argument("station_id")
     args = parser.parse_args()

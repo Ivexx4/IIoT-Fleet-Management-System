@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
 from math import inf
 
@@ -52,7 +53,7 @@ def route_cost(robot_location: str, shelf_id: str, station_id: str) -> int:
 
 
 def minimum_cost_assignment(
-    costs: list[list[int | float]],
+    costs: Sequence[Sequence[int | float]],
 ) -> list[tuple[int, int]]:
     """Return a globally minimum one-to-one assignment via the Hungarian method."""
     if not costs or not costs[0]:
@@ -87,9 +88,7 @@ def minimum_cost_assignment(
                 if used[column]:
                     continue
                 reduced_cost = (
-                    matrix[current_row - 1][column - 1]
-                    - u[current_row]
-                    - v[column]
+                    matrix[current_row - 1][column - 1] - u[current_row] - v[column]
                 )
                 if reduced_cost < minimum[column]:
                     minimum[column] = reduced_cost

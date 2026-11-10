@@ -27,9 +27,11 @@ def send_order(
             sock.sendto(message, (host, port))
             try:
                 response, _ = sock.recvfrom(1024)
-            except TimeoutError:
+            except TimeoutError as error:
                 if attempt == 2:
-                    raise TimeoutError("Coordinator did not acknowledge the order")
+                    raise TimeoutError(
+                        "Coordinator did not acknowledge the order"
+                    ) from error
                 continue
             result = json.loads(response.decode("utf-8"))
             if (

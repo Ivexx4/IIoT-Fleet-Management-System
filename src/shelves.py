@@ -1,9 +1,8 @@
 import argparse
-import json
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import paho.mqtt.client as mqtt
@@ -105,14 +104,16 @@ class Shelf:
             else:
                 should_publish = False
         if should_publish:
-            print(f"[{self.asset_id}] Refilled to {self.max_stock} {self.config['unit']}")
+            print(
+                f"[{self.asset_id}] Refilled to {self.max_stock} {self.config['unit']}"
+            )
             self.publish_status()
 
     def publish_status(self) -> None:
         with self.lock:
             data = {
                 **self.config,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
         payload = ShelfTelemetry.model_validate(data).model_dump_json(by_alias=True)
         result = self.client.publish(
